@@ -37,18 +37,28 @@ from starlette.routing import Mount
 try:
     import cv2
     import numpy as np
+
     _CV2_AVAILABLE = True
 except ImportError:
     _CV2_AVAILABLE = False
-    print("[go2-mcp] WARNING: opencv-python not installed — capture_image will be unavailable.", file=sys.stderr)
-    print("[go2-mcp]   Install with: pip install opencv-python-headless numpy", file=sys.stderr)
+    print(
+        "[go2-mcp] WARNING: opencv-python not installed — capture_image will be unavailable.",
+        file=sys.stderr,
+    )
+    print(
+        "[go2-mcp]   Install with: pip install opencv-python-headless numpy",
+        file=sys.stderr,
+    )
 
 from mcp.server import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.stdio import stdio_server
 from mcp import types
 
-from unitree_webrtc_connect.webrtc_driver import UnitreeWebRTCConnection, WebRTCConnectionMethod
+from unitree_webrtc_connect.webrtc_driver import (
+    UnitreeWebRTCConnection,
+    WebRTCConnectionMethod,
+)
 from unitree_webrtc_connect.constants import RTC_TOPIC, SPORT_CMD, MCF_CMD
 
 logging.basicConfig(level=logging.WARNING)
@@ -66,35 +76,44 @@ try:
         try:
             if isinstance(error, (list, tuple)) and len(error) == 3:
                 timestamp, error_source, error_code_int = error
-                _eh._original_handle_error_logic(timestamp, error_source, error_code_int)
+                _eh._original_handle_error_logic(
+                    timestamp, error_source, error_code_int
+                )
             else:
-                logging.warning(f"[go2-mcp] Unexpected error format from robot (ignored): {error!r}")
+                logging.warning(
+                    f"[go2-mcp] Unexpected error format from robot (ignored): {error!r}"
+                )
         except Exception as e:
-            logging.warning(f"[go2-mcp] Error handler exception (ignored): {e} — raw error: {error!r}")
+            logging.warning(
+                f"[go2-mcp] Error handler exception (ignored): {e} — raw error: {error!r}"
+            )
 
     # Preserve any original logic if needed, then replace
     _eh.handle_error = _safe_handle_error
     print("[go2-mcp] Applied error_handler patch.", file=sys.stderr)
 except Exception as _patch_err:
-    print(f"[go2-mcp] Could not patch error_handler (non-fatal): {_patch_err}", file=sys.stderr)
+    print(
+        f"[go2-mcp] Could not patch error_handler (non-fatal): {_patch_err}",
+        file=sys.stderr,
+    )
 
 # ---------------------------------------------------------------------------
 # MCF topic — all MCF_CMD calls go here (firmware 1.1.7+)
 # ---------------------------------------------------------------------------
-MCF_TOPIC = "rt/api/sport/request"   # same wire topic as SPORT_MOD; MCF just uses different api_ids
+MCF_TOPIC = "rt/api/sport/request"  # same wire topic as SPORT_MOD; MCF just uses different api_ids
 
 # ---------------------------------------------------------------------------
 # Shared state
 # ---------------------------------------------------------------------------
 _conn: UnitreeWebRTCConnection | None = None
 _latest_sport_state: dict = {}
-_latest_low_state:   dict = {}
+_latest_low_state: dict = {}
 _latest_multi_state: dict = {}
 
 # Camera — latest decoded frame as JPEG bytes, updated continuously in background
 _latest_frame_jpg: bytes | None = None
-_latest_frame_ts: float = 0.0      # unix time of last frame
-_video_track = None                 # aiortc VideoStreamTrack from the robot
+_latest_frame_ts: float = 0.0  # unix time of last frame
+_video_track = None  # aiortc VideoStreamTrack from the robot
 
 
 async def get_conn() -> UnitreeWebRTCConnection:
@@ -114,7 +133,11 @@ async def _mcf(conn, cmd_name: str, parameter: dict | None = None) -> dict:
         payload["parameter"] = parameter
     resp = await conn.datachannel.pub_sub.publish_request_new(MCF_TOPIC, payload)
     code = _code(resp)
-    return {"status": "ok" if code == 0 else "error", "command": cmd_name, "response_code": code}
+    return {
+        "status": "ok" if code == 0 else "error",
+        "command": cmd_name,
+        "response_code": code,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +149,6 @@ server = Server("unitree-go2")
 @server.list_tools()
 async def list_tools() -> list[types.Tool]:
     return [
-
         # ── Movement ──────────────────────────────────────────────────────────
         types.Tool(
             name="move",
@@ -147,62 +169,52 @@ async def list_tools() -> list[types.Tool]:
                 "required": [],
             },
         ),
-
         types.Tool(
             name="stop",
             description="Stop all motion immediately.",
             inputSchema={"type": "object", "properties": {}},
         ),
-
         # ── Stance ────────────────────────────────────────────────────────────
         types.Tool(
             name="stand_up",
             description="Stand up from lying or sitting.",
             inputSchema={"type": "object", "properties": {}},
         ),
-
         types.Tool(
             name="stand_down",
             description="Lie down / sit down.",
             inputSchema={"type": "object", "properties": {}},
         ),
-
         types.Tool(
             name="balance_stand",
             description="Enter balanced stand mode — stands still, ready.",
             inputSchema={"type": "object", "properties": {}},
         ),
-
         types.Tool(
             name="recovery_stand",
             description="Right the robot if it has fallen over.",
             inputSchema={"type": "object", "properties": {}},
         ),
-
         types.Tool(
             name="sit",
             description="Make the robot sit.",
             inputSchema={"type": "object", "properties": {}},
         ),
-
         types.Tool(
             name="rise_sit",
             description="Rise from sitting position.",
             inputSchema={"type": "object", "properties": {}},
         ),
-
         types.Tool(
             name="damp",
             description="Damp all joints — robot goes limp/safe. Use before picking up or powering down.",
             inputSchema={"type": "object", "properties": {}},
         ),
-
         types.Tool(
             name="back_stand",
             description="Rear-leg stand — robot stands up on its hind legs.",
             inputSchema={"type": "object", "properties": {}},
         ),
-
         # ── Gaits ─────────────────────────────────────────────────────────────
         types.Tool(
             name="set_gait",
@@ -225,22 +237,27 @@ async def list_tools() -> list[types.Tool]:
                     "gait": {
                         "type": "string",
                         "enum": [
-                            "economic", "static", "trot_run",
-                            "free_walk", "free_bound", "free_jump", "free_avoid",
-                            "classic", "cross_step", "continuous",
+                            "economic",
+                            "static",
+                            "trot_run",
+                            "free_walk",
+                            "free_bound",
+                            "free_jump",
+                            "free_avoid",
+                            "classic",
+                            "cross_step",
+                            "continuous",
                         ],
                     }
                 },
                 "required": ["gait"],
             },
         ),
-
         types.Tool(
             name="lead_follow",
             description="Activate Lead-Follow mode — robot follows the nearest person.",
             inputSchema={"type": "object", "properties": {}},
         ),
-
         # ── Body / pose ───────────────────────────────────────────────────────
         types.Tool(
             name="set_body_height",
@@ -248,36 +265,37 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "height": {"type": "number", "description": "Height offset in metres"}
+                    "height": {
+                        "type": "number",
+                        "description": "Height offset in metres",
+                    }
                 },
                 "required": ["height"],
             },
         ),
-
         types.Tool(
             name="set_foot_raise_height",
             description="Set how high the robot lifts its feet while walking, in metres (e.g. 0.08).",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "height": {"type": "number", "description": "Foot raise height in metres"}
+                    "height": {
+                        "type": "number",
+                        "description": "Foot raise height in metres",
+                    }
                 },
                 "required": ["height"],
             },
         ),
-
         types.Tool(
             name="set_speed_level",
             description="Set walking speed level: 0 = slow, 1 = normal, 2 = fast.",
             inputSchema={
                 "type": "object",
-                "properties": {
-                    "level": {"type": "integer", "enum": [0, 1, 2]}
-                },
+                "properties": {"level": {"type": "integer", "enum": [0, 1, 2]}},
                 "required": ["level"],
             },
         ),
-
         types.Tool(
             name="set_euler",
             description=(
@@ -290,47 +308,40 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "roll":  {"type": "number", "description": "Roll radians"},
+                    "roll": {"type": "number", "description": "Roll radians"},
                     "pitch": {"type": "number", "description": "Pitch radians"},
-                    "yaw":   {"type": "number", "description": "Yaw radians"},
+                    "yaw": {"type": "number", "description": "Yaw radians"},
                 },
                 "required": [],
             },
         ),
-
         # ── Friendly / social actions ─────────────────────────────────────────
         types.Tool(
             name="hello",
             description="Wave hello — robot raises a leg and waves at you.",
             inputSchema={"type": "object", "properties": {}},
         ),
-
         types.Tool(
             name="show_heart",
             description="Robot makes a heart shape / finger-heart gesture. Uses MCF Heart (api_id 1036). Same underlying command as finger_heart.",
             inputSchema={"type": "object", "properties": {}},
         ),
-
         types.Tool(
             name="stretch",
             description="Robot does a full stretch.",
             inputSchema={"type": "object", "properties": {}},
         ),
-
         # content (1020) removed — RoboVerse docs confirm "API not implemented on the server"
-
         types.Tool(
             name="scrape",
             description="Robot does a scraping/pawing motion with its front leg.",
             inputSchema={"type": "object", "properties": {}},
         ),
-
         types.Tool(
             name="wallow",
             description="Robot rolls around on its back (wallowing/rolling).",
             inputSchema={"type": "object", "properties": {}},
         ),
-
         # ── Dance ─────────────────────────────────────────────────────────────
         types.Tool(
             name="dance",
@@ -338,12 +349,15 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "routine": {"type": "integer", "enum": [1, 2], "description": "Dance routine 1 or 2"}
+                    "routine": {
+                        "type": "integer",
+                        "enum": [1, 2],
+                        "description": "Dance routine 1 or 2",
+                    }
                 },
                 "required": [],
             },
         ),
-
         # ── Acrobatics ────────────────────────────────────────────────────────
         types.Tool(
             name="flip",
@@ -367,7 +381,6 @@ async def list_tools() -> list[types.Tool]:
                 "required": ["direction"],
             },
         ),
-
         types.Tool(
             name="handstand",
             description=(
@@ -377,31 +390,26 @@ async def list_tools() -> list[types.Tool]:
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
-
         types.Tool(
             name="front_jump",
             description="Robot performs a forward jump. Call directly — no mode switch needed on firmware 1.1.7+ MCF. Requires flat surface with landing space.",
             inputSchema={"type": "object", "properties": {}},
         ),
-
         types.Tool(
             name="front_pounce",
             description="Robot performs a pouncing leap forward. Call directly — no mode switch needed on firmware 1.1.7+ MCF.",
             inputSchema={"type": "object", "properties": {}},
         ),
-
         types.Tool(
             name="wiggle_hips",
             description="Robot wiggles its hips. Good for celebrations.",
             inputSchema={"type": "object", "properties": {}},
         ),
-
         types.Tool(
             name="finger_heart",
             description="Robot makes a finger-heart gesture with its leg. Uses api_id 1036 (same as show_heart / MCF Heart).",
             inputSchema={"type": "object", "properties": {}},
         ),
-
         types.Tool(
             name="moon_walk",
             description=(
@@ -411,19 +419,16 @@ async def list_tools() -> list[types.Tool]:
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
-
         types.Tool(
             name="one_sided_step",
             description="Robot does a one-sided stepping motion (api_id 1303).",
             inputSchema={"type": "object", "properties": {}},
         ),
-
         types.Tool(
             name="bound",
             description="Robot performs a bounding gallop motion (api_id 1304).",
             inputSchema={"type": "object", "properties": {}},
         ),
-
         # ── Motion mode ───────────────────────────────────────────────────────
         types.Tool(
             name="set_motion_mode",
@@ -449,56 +454,44 @@ async def list_tools() -> list[types.Tool]:
                 "required": ["mode"],
             },
         ),
-
         types.Tool(
             name="get_motion_mode",
             description="Get the current motion mode name.",
             inputSchema={"type": "object", "properties": {}},
         ),
-
         # ── Auto recovery / avoid mode ────────────────────────────────────────
         types.Tool(
             name="set_auto_recovery",
             description="Enable or disable automatic self-righting when the robot falls.",
             inputSchema={
                 "type": "object",
-                "properties": {
-                    "enabled": {"type": "boolean"}
-                },
+                "properties": {"enabled": {"type": "boolean"}},
                 "required": ["enabled"],
             },
         ),
-
         types.Tool(
             name="get_auto_recovery",
             description="Get whether automatic self-righting recovery is enabled.",
             inputSchema={"type": "object", "properties": {}},
         ),
-
         types.Tool(
             name="set_avoid_mode",
             description="Switch the obstacle avoidance mode on or off via MCF SwitchAvoidMode.",
             inputSchema={
                 "type": "object",
-                "properties": {
-                    "enabled": {"type": "boolean"}
-                },
+                "properties": {"enabled": {"type": "boolean"}},
                 "required": ["enabled"],
             },
         ),
-
         types.Tool(
             name="set_obstacle_avoidance",
             description="Enable or disable obstacle avoidance via the OBSTACLES_AVOID API.",
             inputSchema={
                 "type": "object",
-                "properties": {
-                    "enabled": {"type": "boolean"}
-                },
+                "properties": {"enabled": {"type": "boolean"}},
                 "required": ["enabled"],
             },
         ),
-
         # ── Telemetry ─────────────────────────────────────────────────────────
         types.Tool(
             name="get_sport_state",
@@ -508,7 +501,6 @@ async def list_tools() -> list[types.Tool]:
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
-
         types.Tool(
             name="get_low_state",
             description=(
@@ -517,7 +509,6 @@ async def list_tools() -> list[types.Tool]:
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
-
         types.Tool(
             name="get_multiple_state",
             description=(
@@ -526,13 +517,11 @@ async def list_tools() -> list[types.Tool]:
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
-
         types.Tool(
             name="get_robot_state",
             description="Query the robot's full internal state snapshot via MCF GetState.",
             inputSchema={"type": "object", "properties": {}},
         ),
-
         # ── VUI — lights & sound ──────────────────────────────────────────────
         types.Tool(
             name="set_led_color",
@@ -543,14 +532,27 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "color":       {"type": "string",  "enum": ["white","red","yellow","blue","green","cyan","purple"]},
-                    "duration":    {"type": "number",  "description": "Seconds"},
-                    "flash_cycle": {"type": "integer", "description": "Flash period ms (optional, min 499)"},
+                    "color": {
+                        "type": "string",
+                        "enum": [
+                            "white",
+                            "red",
+                            "yellow",
+                            "blue",
+                            "green",
+                            "cyan",
+                            "purple",
+                        ],
+                    },
+                    "duration": {"type": "number", "description": "Seconds"},
+                    "flash_cycle": {
+                        "type": "integer",
+                        "description": "Flash period ms (optional, min 499)",
+                    },
                 },
                 "required": ["color", "duration"],
             },
         ),
-
         types.Tool(
             name="set_brightness",
             description="Set front LED flashlight brightness (0=off, 10=max).",
@@ -562,7 +564,6 @@ async def list_tools() -> list[types.Tool]:
                 "required": ["brightness"],
             },
         ),
-
         types.Tool(
             name="set_volume",
             description="Set speaker volume (0=silent, 10=max).",
@@ -574,13 +575,11 @@ async def list_tools() -> list[types.Tool]:
                 "required": ["volume"],
             },
         ),
-
         types.Tool(
             name="get_volume",
             description="Get current speaker volume (0-10).",
             inputSchema={"type": "object", "properties": {}},
         ),
-
         # ── LiDAR ─────────────────────────────────────────────────────────────
         types.Tool(
             name="lidar_snapshot",
@@ -590,7 +589,6 @@ async def list_tools() -> list[types.Tool]:
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
-
         # ── Camera ────────────────────────────────────────────────────────────
         types.Tool(
             name="capture_image",
@@ -621,22 +619,22 @@ async def list_tools() -> list[types.Tool]:
 # Gait name -> MCF_CMD key
 # ---------------------------------------------------------------------------
 _GAIT_MAP = {
-    "economic":   "EconomicGait",
-    "static":     "StaticWalk",
-    "trot_run":   "TrotRun",
-    "free_walk":  "FreeWalk",
+    "economic": "EconomicGait",
+    "static": "StaticWalk",
+    "trot_run": "TrotRun",
+    "free_walk": "FreeWalk",
     "free_bound": "FreeBound",
-    "free_jump":  "FreeJump",
+    "free_jump": "FreeJump",
     "free_avoid": "FreeAvoid",
-    "classic":    "ClassicWalk",
+    "classic": "ClassicWalk",
     "cross_step": "CrossStep",
     "continuous": "ContinuousGait",
 }
 
 _FLIP_MAP = {
     "front": "FrontFlip",
-    "back":  "BackFlip",
-    "left":  "LeftFlip",
+    "back": "BackFlip",
+    "left": "LeftFlip",
     "right": "RightFlip",
 }
 
@@ -645,29 +643,33 @@ _FLIP_MAP = {
 # Tool dispatch
 # ---------------------------------------------------------------------------
 
+
 @server.call_tool()
-async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent | types.ImageContent]:
+async def call_tool(
+    name: str, arguments: dict[str, Any]
+) -> list[types.TextContent | types.ImageContent]:
     conn = await get_conn()
     try:
         result = await _dispatch(conn, name, arguments)
     except Exception as e:
         result = {"error": str(e)}
 
-    # capture_image returns a dict with image_base64 — emit as ImageContent
-    # so vision-capable models receive it as actual image input, not base64 text
-    if isinstance(result, dict) and result.get("status") == "ok" and "image_base64" in result:
+    # capture_image returns a dict with image_base64 — emit as markdown data URI
+    # so Open WebUI can render it as an image (ImageContent blocks don't render in tool outputs)
+    if (
+        isinstance(result, dict)
+        and result.get("status") == "ok"
+        and "image_base64" in result
+    ):
         b64 = result.pop("image_base64")
         meta = json.dumps({k: v for k, v in result.items()}, indent=2)
-        return [
-            types.ImageContent(type="image", data=b64, mimeType="image/jpeg"),
-            types.TextContent(type="text", text=meta),
-        ]
+        md_image = f"![Go2 Camera View](data:image/jpeg;base64,{b64})"
+        return [types.TextContent(type="text", text=md_image + "\n\n" + meta)]
 
     return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
 
 async def _dispatch(conn: UnitreeWebRTCConnection, name: str, args: dict) -> dict:
-
     # ── Movement ──────────────────────────────────────────────────────────────
     if name == "move":
         x = float(args.get("x", 0))
@@ -706,7 +708,7 @@ async def _dispatch(conn: UnitreeWebRTCConnection, name: str, args: dict) -> dic
     # ── Gaits ─────────────────────────────────────────────────────────────────
     elif name == "set_gait":
         gait = args["gait"]
-        cmd  = _GAIT_MAP.get(gait)
+        cmd = _GAIT_MAP.get(gait)
         if not cmd:
             return {"error": f"Unknown gait '{gait}'"}
         return await _mcf(conn, cmd)
@@ -725,9 +727,9 @@ async def _dispatch(conn: UnitreeWebRTCConnection, name: str, args: dict) -> dic
         return await _mcf(conn, "SpeedLevel", {"data": int(args["level"])})
 
     elif name == "set_euler":
-        roll  = float(args.get("roll",  0))
+        roll = float(args.get("roll", 0))
         pitch = float(args.get("pitch", 0))
-        yaw   = float(args.get("yaw",   0))
+        yaw = float(args.get("yaw", 0))
         return await _mcf(conn, "Euler", {"x": roll, "y": pitch, "z": yaw})
 
     # ── Friendly / social ─────────────────────────────────────────────────────
@@ -749,7 +751,11 @@ async def _dispatch(conn: UnitreeWebRTCConnection, name: str, args: dict) -> dic
             MCF_TOPIC, {"api_id": 1021}
         )
         code = _code(resp)
-        return {"status": "ok" if code == 0 else "error", "command": "Wallow", "response_code": code}
+        return {
+            "status": "ok" if code == 0 else "error",
+            "command": "Wallow",
+            "response_code": code,
+        }
 
     # ── Dance ─────────────────────────────────────────────────────────────────
     elif name == "dance":
@@ -780,7 +786,11 @@ async def _dispatch(conn: UnitreeWebRTCConnection, name: str, args: dict) -> dic
             MCF_TOPIC, {"api_id": 1033}
         )
         code = _code(resp)
-        return {"status": "ok" if code == 0 else "error", "command": "WiggleHips", "response_code": code}
+        return {
+            "status": "ok" if code == 0 else "error",
+            "command": "WiggleHips",
+            "response_code": code,
+        }
 
     elif name == "finger_heart":
         # FingerHeart=1036 same as MCF Heart=1036 — they are the same command
@@ -792,21 +802,33 @@ async def _dispatch(conn: UnitreeWebRTCConnection, name: str, args: dict) -> dic
             MCF_TOPIC, {"api_id": 1046}
         )
         code = _code(resp)
-        return {"status": "ok" if code == 0 else "error", "command": "MoonWalk", "response_code": code}
+        return {
+            "status": "ok" if code == 0 else "error",
+            "command": "MoonWalk",
+            "response_code": code,
+        }
 
     elif name == "one_sided_step":
         resp = await conn.datachannel.pub_sub.publish_request_new(
             MCF_TOPIC, {"api_id": 1303}
         )
         code = _code(resp)
-        return {"status": "ok" if code == 0 else "error", "command": "OnesidedStep", "response_code": code}
+        return {
+            "status": "ok" if code == 0 else "error",
+            "command": "OnesidedStep",
+            "response_code": code,
+        }
 
     elif name == "bound":
         resp = await conn.datachannel.pub_sub.publish_request_new(
             MCF_TOPIC, {"api_id": 1304}
         )
         code = _code(resp)
-        return {"status": "ok" if code == 0 else "error", "command": "Bound", "response_code": code}
+        return {
+            "status": "ok" if code == 0 else "error",
+            "command": "Bound",
+            "response_code": code,
+        }
 
     # ── Motion mode ───────────────────────────────────────────────────────────
     elif name == "set_motion_mode":
@@ -817,9 +839,17 @@ async def _dispatch(conn: UnitreeWebRTCConnection, name: str, args: dict) -> dic
         )
         code = _code(resp)
         if code == 7004:
-            return {"status": "ok", "mode": "mcf", "response_code": 7004,
-                    "note": "Firmware 1.1.7+ MCF mode active — mode switch not needed, all commands work directly"}
-        return {"status": "ok" if code == 0 else "error", "mode": mode, "response_code": code}
+            return {
+                "status": "ok",
+                "mode": "mcf",
+                "response_code": 7004,
+                "note": "Firmware 1.1.7+ MCF mode active — mode switch not needed, all commands work directly",
+            }
+        return {
+            "status": "ok" if code == 0 else "error",
+            "mode": mode,
+            "response_code": code,
+        }
 
     elif name == "get_motion_mode":
         resp = await conn.datachannel.pub_sub.publish_request_new(
@@ -830,7 +860,11 @@ async def _dispatch(conn: UnitreeWebRTCConnection, name: str, args: dict) -> dic
             data = json.loads(resp["data"]["data"])
             return {"status": "ok", "mode": data.get("name")}
         if code == 7004:
-            return {"status": "ok", "mode": "mcf", "note": "Firmware 1.1.7+ MCF unified mode active — all acrobatics work directly"}
+            return {
+                "status": "ok",
+                "mode": "mcf",
+                "note": "Firmware 1.1.7+ MCF unified mode active — all acrobatics work directly",
+            }
         return {"status": "error", "response_code": code}
 
     # ── Auto recovery / avoid ─────────────────────────────────────────────────
@@ -859,22 +893,35 @@ async def _dispatch(conn: UnitreeWebRTCConnection, name: str, args: dict) -> dic
             {"api_id": 1001, "parameter": {"switch": 1 if enabled else 0}},
         )
         code = _code(resp)
-        return {"status": "ok" if code == 0 else "error", "enabled": enabled, "response_code": code}
+        return {
+            "status": "ok" if code == 0 else "error",
+            "enabled": enabled,
+            "response_code": code,
+        }
 
     # ── Telemetry ─────────────────────────────────────────────────────────────
     elif name == "get_sport_state":
         if not _latest_sport_state:
-            return {"status": "no_data", "message": "No data yet — try again in a moment."}
+            return {
+                "status": "no_data",
+                "message": "No data yet — try again in a moment.",
+            }
         return {"status": "ok", "state": _latest_sport_state}
 
     elif name == "get_low_state":
         if not _latest_low_state:
-            return {"status": "no_data", "message": "No data yet — try again in a moment."}
+            return {
+                "status": "no_data",
+                "message": "No data yet — try again in a moment.",
+            }
         return {"status": "ok", "state": _latest_low_state}
 
     elif name == "get_multiple_state":
         if not _latest_multi_state:
-            return {"status": "no_data", "message": "No data yet — try again in a moment."}
+            return {
+                "status": "no_data",
+                "message": "No data yet — try again in a moment.",
+            }
         return {"status": "ok", "state": _latest_multi_state}
 
     elif name == "get_robot_state":
@@ -888,7 +935,7 @@ async def _dispatch(conn: UnitreeWebRTCConnection, name: str, args: dict) -> dic
 
     # ── VUI ───────────────────────────────────────────────────────────────────
     elif name == "set_led_color":
-        color    = args["color"]
+        color = args["color"]
         duration = int(float(args["duration"]))
         param: dict = {"color": color, "time": duration}
         if "flash_cycle" in args:
@@ -897,7 +944,11 @@ async def _dispatch(conn: UnitreeWebRTCConnection, name: str, args: dict) -> dic
             RTC_TOPIC["VUI"], {"api_id": 1007, "parameter": param}
         )
         code = _code(resp)
-        return {"status": "ok" if code == 0 else "error", "color": color, "response_code": code}
+        return {
+            "status": "ok" if code == 0 else "error",
+            "color": color,
+            "response_code": code,
+        }
 
     elif name == "set_brightness":
         brightness = int(args["brightness"])
@@ -905,7 +956,11 @@ async def _dispatch(conn: UnitreeWebRTCConnection, name: str, args: dict) -> dic
             RTC_TOPIC["VUI"], {"api_id": 1005, "parameter": {"brightness": brightness}}
         )
         code = _code(resp)
-        return {"status": "ok" if code == 0 else "error", "brightness": brightness, "response_code": code}
+        return {
+            "status": "ok" if code == 0 else "error",
+            "brightness": brightness,
+            "response_code": code,
+        }
 
     elif name == "set_volume":
         volume = int(args["volume"])
@@ -913,7 +968,11 @@ async def _dispatch(conn: UnitreeWebRTCConnection, name: str, args: dict) -> dic
             RTC_TOPIC["VUI"], {"api_id": 1003, "parameter": {"volume": volume}}
         )
         code = _code(resp)
-        return {"status": "ok" if code == 0 else "error", "volume": volume, "response_code": code}
+        return {
+            "status": "ok" if code == 0 else "error",
+            "volume": volume,
+            "response_code": code,
+        }
 
     elif name == "get_volume":
         resp = await conn.datachannel.pub_sub.publish_request_new(
@@ -933,6 +992,7 @@ async def _dispatch(conn: UnitreeWebRTCConnection, name: str, args: dict) -> dic
         def lidar_cb(message):
             try:
                 import numpy as np
+
                 data = message.get("data", {}).get("data", {})
 
                 # positions may be a numpy array, nested list, or flat list
@@ -943,26 +1003,28 @@ async def _dispatch(conn: UnitreeWebRTCConnection, name: str, args: dict) -> dic
                     # Always normalise to a plain flat Python list of numbers
                     if isinstance(positions, np.ndarray):
                         positions = positions.flatten().tolist()
-                    elif hasattr(positions, 'tolist'):
+                    elif hasattr(positions, "tolist"):
                         positions = positions.tolist()
                     else:
                         positions = list(positions)
 
                     if len(positions) >= 3:
-                        pts = [[positions[i], positions[i+1], positions[i+2]]
-                               for i in range(0, len(positions) - 2, 3)]
+                        pts = [
+                            [positions[i], positions[i + 1], positions[i + 2]]
+                            for i in range(0, len(positions) - 2, 3)
+                        ]
                         if pts:
                             xs = [p[0] for p in pts]
                             ys = [p[1] for p in pts]
                             zs = [p[2] for p in pts]
-                            snap["point_count"]  = len(pts)
+                            snap["point_count"] = len(pts)
                             snap["bounding_box"] = {
                                 "x_m": [round(min(xs), 3), round(max(xs), 3)],
                                 "y_m": [round(min(ys), 3), round(max(ys), 3)],
                                 "z_m": [round(min(zs), 3), round(max(zs), 3)],
                             }
 
-                snap["origin"]     = message.get("data", {}).get("origin")
+                snap["origin"] = message.get("data", {}).get("origin")
                 snap["resolution"] = message.get("data", {}).get("resolution")
             except Exception as e:
                 snap["lidar_parse_error"] = str(e)
@@ -977,7 +1039,9 @@ async def _dispatch(conn: UnitreeWebRTCConnection, name: str, args: dict) -> dic
             await asyncio.wait_for(event.wait(), timeout=5.0)
         except asyncio.TimeoutError:
             conn.datachannel.pub_sub.unsubscribe(RTC_TOPIC["ULIDAR_ARRAY"])
-            conn.datachannel.pub_sub.publish_without_callback("rt/utlidar/switch", "off")
+            conn.datachannel.pub_sub.publish_without_callback(
+                "rt/utlidar/switch", "off"
+            )
             return {"status": "error", "message": "LiDAR timeout — no data in 5 s"}
 
         conn.datachannel.pub_sub.unsubscribe(RTC_TOPIC["ULIDAR_ARRAY"])
@@ -987,15 +1051,27 @@ async def _dispatch(conn: UnitreeWebRTCConnection, name: str, args: dict) -> dic
 
     elif name == "capture_image":
         if not _CV2_AVAILABLE:
-            return {"status": "error", "message": "opencv-python not installed. Run: pip install opencv-python-headless numpy"}
+            return {
+                "status": "error",
+                "message": "opencv-python not installed. Run: pip install opencv-python-headless numpy",
+            }
         if _latest_frame_jpg is None:
-            return {"status": "no_data", "message": "No camera frame received yet — video track may still be initialising. Try again in a moment."}
-        quality  = int(args.get("quality", 75))
-        age_s    = round(time.time() - _latest_frame_ts, 2)
+            return {
+                "status": "no_data",
+                "message": "No camera frame received yet — video track may still be initialising. Try again in a moment.",
+            }
+        quality = int(args.get("quality", 75))
+        age_s = round(time.time() - _latest_frame_ts, 2)
         if age_s > 5.0:
-            return {"status": "stale", "message": f"Latest frame is {age_s}s old — video track may have dropped.", "age_seconds": age_s}
+            return {
+                "status": "stale",
+                "message": f"Latest frame is {age_s}s old — video track may have dropped.",
+                "age_seconds": age_s,
+            }
         # Re-encode at requested quality
-        img_np = cv2.imdecode(np.frombuffer(_latest_frame_jpg, np.uint8), cv2.IMREAD_COLOR)
+        img_np = cv2.imdecode(
+            np.frombuffer(_latest_frame_jpg, np.uint8), cv2.IMREAD_COLOR
+        )
         ok, buf = cv2.imencode(".jpg", img_np, [cv2.IMWRITE_JPEG_QUALITY, quality])
         if not ok:
             return {"status": "error", "message": "Failed to encode frame"}
@@ -1019,6 +1095,7 @@ async def _dispatch(conn: UnitreeWebRTCConnection, name: str, args: dict) -> dic
 # Background state subscriptions
 # ---------------------------------------------------------------------------
 
+
 def _setup_state_subscriptions(conn: UnitreeWebRTCConnection) -> None:
     def on_sport(msg):
         global _latest_sport_state
@@ -1037,13 +1114,14 @@ def _setup_state_subscriptions(conn: UnitreeWebRTCConnection) -> None:
             _latest_multi_state = {}
 
     conn.datachannel.pub_sub.subscribe(RTC_TOPIC["LF_SPORT_MOD_STATE"], on_sport)
-    conn.datachannel.pub_sub.subscribe(RTC_TOPIC["LOW_STATE"],           on_low)
-    conn.datachannel.pub_sub.subscribe(RTC_TOPIC["MULTIPLE_STATE"],      on_multi)
+    conn.datachannel.pub_sub.subscribe(RTC_TOPIC["LOW_STATE"], on_low)
+    conn.datachannel.pub_sub.subscribe(RTC_TOPIC["MULTIPLE_STATE"], on_multi)
 
 
 # ---------------------------------------------------------------------------
 # Background video frame loop
 # ---------------------------------------------------------------------------
+
 
 async def _video_frame_loop(track) -> None:
     """Continuously pull frames from the robot camera and keep the latest as JPEG bytes."""
@@ -1067,9 +1145,12 @@ async def _video_frame_loop(track) -> None:
             ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
             if ok:
                 _latest_frame_jpg = buf.tobytes()
-                _latest_frame_ts  = time.time()
+                _latest_frame_ts = time.time()
                 if frame_count % 30 == 0:
-                    print(f"[go2-mcp] Camera: {frame_count} frames captured, shape={img.shape}", file=sys.stderr)
+                    print(
+                        f"[go2-mcp] Camera: {frame_count} frames captured, shape={img.shape}",
+                        file=sys.stderr,
+                    )
         except Exception as e:
             print(f"[go2-mcp] Video loop error: {e}", file=sys.stderr)
             await asyncio.sleep(0.1)
@@ -1085,24 +1166,33 @@ async def _setup_video_track(conn: UnitreeWebRTCConnection) -> None:
 
     video_channel = getattr(conn, "video", None)
     if video_channel is None:
-        print("[go2-mcp] WARNING: conn.video is None — camera unavailable.", file=sys.stderr)
+        print(
+            "[go2-mcp] WARNING: conn.video is None — camera unavailable.",
+            file=sys.stderr,
+        )
         return
 
     async def on_track(track):
         global _video_track
         _video_track = track
-        print(f"[go2-mcp] Video track callback fired: {type(track).__name__}", file=sys.stderr)
+        print(
+            f"[go2-mcp] Video track callback fired: {type(track).__name__}",
+            file=sys.stderr,
+        )
         asyncio.ensure_future(_video_frame_loop(track))
 
     video_channel.add_track_callback(on_track)
     await asyncio.sleep(0.5)
     video_channel.switchVideoChannel(True)
-    print("[go2-mcp] Video channel enabled — waiting for track callback.", file=sys.stderr)
+    print(
+        "[go2-mcp] Video channel enabled — waiting for track callback.", file=sys.stderr
+    )
 
 
 # ---------------------------------------------------------------------------
 # Robot connection
 # ---------------------------------------------------------------------------
+
 
 async def _connect_robot(args: argparse.Namespace) -> UnitreeWebRTCConnection:
     print("[go2-mcp] Connecting to Go2 via WebRTC ...", file=sys.stderr)
@@ -1114,7 +1204,9 @@ async def _connect_robot(args: argparse.Namespace) -> UnitreeWebRTCConnection:
             password=args.password,
         )
     elif args.serial and not args.ip:
-        conn = UnitreeWebRTCConnection(WebRTCConnectionMethod.LocalSTA, serialNumber=args.serial)
+        conn = UnitreeWebRTCConnection(
+            WebRTCConnectionMethod.LocalSTA, serialNumber=args.serial
+        )
     elif args.ip:
         conn = UnitreeWebRTCConnection(WebRTCConnectionMethod.LocalSTA, ip=args.ip)
     else:
@@ -1129,6 +1221,7 @@ async def _connect_robot(args: argparse.Namespace) -> UnitreeWebRTCConnection:
 # HTTP mode
 # ---------------------------------------------------------------------------
 
+
 async def run_http(args: argparse.Namespace) -> None:
     global _conn
     _conn = await _connect_robot(args)
@@ -1136,7 +1229,10 @@ async def run_http(args: argparse.Namespace) -> None:
     await _setup_video_track(_conn)
 
     session_manager = StreamableHTTPSessionManager(
-        app=server, event_store=None, json_response=False, stateless=True,
+        app=server,
+        event_store=None,
+        json_response=False,
+        stateless=True,
     )
 
     async def mcp_handler(scope, receive, send):
@@ -1145,10 +1241,18 @@ async def run_http(args: argparse.Namespace) -> None:
     starlette_app = Starlette(routes=[Mount("/mcp", app=mcp_handler)])
 
     print(f"[go2-mcp] Listening on http://{args.host}:{args.port}/mcp", file=sys.stderr)
-    print(f"[go2-mcp] OpenWebUI -> Admin Panel -> Tools -> Add Connection", file=sys.stderr)
-    print(f"[go2-mcp]   Type: MCP (Streamable HTTP)  URL: http://<YOUR-IP>:{args.port}/mcp", file=sys.stderr)
+    print(
+        f"[go2-mcp] OpenWebUI -> Admin Panel -> Tools -> Add Connection",
+        file=sys.stderr,
+    )
+    print(
+        f"[go2-mcp]   Type: MCP (Streamable HTTP)  URL: http://<YOUR-IP>:{args.port}/mcp",
+        file=sys.stderr,
+    )
 
-    config  = uvicorn.Config(starlette_app, host=args.host, port=args.port, log_level="warning")
+    config = uvicorn.Config(
+        starlette_app, host=args.host, port=args.port, log_level="warning"
+    )
     userver = uvicorn.Server(config)
     async with session_manager.run():
         await userver.serve()
@@ -1158,6 +1262,7 @@ async def run_http(args: argparse.Namespace) -> None:
 # stdio mode
 # ---------------------------------------------------------------------------
 
+
 async def run_stdio(args: argparse.Namespace) -> None:
     global _conn
     _conn = await _connect_robot(args)
@@ -1165,23 +1270,26 @@ async def run_stdio(args: argparse.Namespace) -> None:
     await _setup_video_track(_conn)
     print("[go2-mcp] Running in stdio mode.", file=sys.stderr)
     async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+        await server.run(
+            read_stream, write_stream, server.create_initialization_options()
+        )
 
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Unitree Go2 WebRTC MCP Server")
-    p.add_argument("--ip",       default="10.0.0.207", help="Robot IP (default: 10.0.0.207)")
-    p.add_argument("--serial",   help="Robot serial number")
-    p.add_argument("--remote",   action="store_true")
+    p.add_argument("--ip", default="10.0.0.207", help="Robot IP (default: 10.0.0.207)")
+    p.add_argument("--serial", help="Robot serial number")
+    p.add_argument("--remote", action="store_true")
     p.add_argument("--username", help="Unitree account email (remote mode)")
     p.add_argument("--password", help="Unitree account password (remote mode)")
-    p.add_argument("--host",     default="0.0.0.0")
-    p.add_argument("--port",     default=8000, type=int)
-    p.add_argument("--stdio",    action="store_true", help="Use stdio instead of HTTP")
+    p.add_argument("--host", default="0.0.0.0")
+    p.add_argument("--port", default=8000, type=int)
+    p.add_argument("--stdio", action="store_true", help="Use stdio instead of HTTP")
     return p.parse_args()
 
 

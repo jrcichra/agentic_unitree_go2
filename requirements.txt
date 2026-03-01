@@ -5,3 +5,6 @@ uvicorn
 starlette
 opencv-python-headless
 numpy
+pillow
+fastapi
+httpx
