@@ -2,7 +2,7 @@
 
 Control your Unitree Go2 robot dog entirely through natural language — no code, no buttons, just type. This toolkit gives you two powerful ways to interact with your robot.
 
-Built on [unitree_webrtc_connect](https://github.com/12-hak/unitree_webrtc_connect) for WebRTC communication. Thanks to [@12-hak](https://github.com/12-hak) for the library!
+Built on [unitree_webrtc_connect](https://github.com/legion1581/unitree_webrtc_connect) for WebRTC communication. Thanks to [@legion1581](https://github.com/legion1581) for the library!
 
 | Tool | Best For | Interface |
 |------|----------|-----------|
