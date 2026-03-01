@@ -7,9 +7,9 @@ A full-screen terminal UI where you type commands in plain English:
   - Bottom: input box (submit with Enter)
 
 Install:
-    pip uninstall unitree_webrtc_connect -y
-    pip install "git+https://github.com/12-hak/unitree_webrtc_connect.git@patch-1"
-    pip install opencv-python-headless numpy requests pillow textual
+    python -m venv venv
+    source venv/bin/activate
+    pip install -r requirements.txt
 
 Run:
     python go2_cli.py

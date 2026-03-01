@@ -1,10 +1,10 @@
 """
 Unitree Go2 WebRTC MCP Server — Streamable HTTP + stdio transport
 
-Install deps:
-    pip uninstall unitree_webrtc_connect -y
-    pip install "git+https://github.com/12-hak/unitree_webrtc_connect.git@patch-1"
-    pip install "mcp[cli]" uvicorn starlette opencv-python-headless numpy
+Install (venv + requirements.txt):
+    python -m venv venv
+    source venv/bin/activate
+    pip install -r requirements.txt
 
 Run (HTTP — OpenWebUI):
     python go2_mcp_server.py

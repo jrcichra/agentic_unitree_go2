@@ -4,7 +4,7 @@ Control your Unitree Go2 robot dog entirely through natural language — no code
 
 Built on [unitree_webrtc_connect](https://github.com/legion1581/unitree_webrtc_connect) for WebRTC communication. Thanks to [@legion1581](https://github.com/legion1581) for the great library!
 
-> This project was fully written by Claude.ai, Grok, and MiniMax M2.5.
+> This project was fully written by Claude.ai, Grok, MiniMax M2.5, and Qwen3.5.
 > 
 > **Disclaimer:** This software controls a real robot. Use at your own risk — I'm not responsible if your Go2 puts a hole in your drywall, trips over your cat, or does anything else dumb.
 
@@ -18,16 +18,15 @@ Built on [unitree_webrtc_connect](https://github.com/legion1581/unitree_webrtc_c
 ## Quick Start
 
 ```bash
-# Install dependencies
-pip uninstall unitree_webrtc_connect -y
-pip install "git+https://github.com/12-hak/unitree_webrtc_connect.git@patch-1"
+# Set up virtual environment and install deps
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
 
 # Option 1: MCP Server (for OpenWebUI / Claude Desktop)
-pip install "mcp[cli]" uvicorn starlette opencv-python-headless numpy
 python go2_mcp_server.py --ip 10.0.0.200 --port 8000
 
 # Option 2: Natural Language TUI (for direct control)
-pip install opencv-python-headless numpy requests pillow textual rich
 python cli.py --ip 10.0.0.200 --model qwen3.5:35b
 ```
 
