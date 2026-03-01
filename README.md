@@ -13,6 +13,8 @@ Built on [unitree_webrtc_connect](https://github.com/legion1581/unitree_webrtc_c
 | **`go2_mcp_server.py`** | AI assistants (OpenWebUI, Claude Desktop) | 50+ MCP tools |
 | **`cli.py`** | Assign tasks — "find the red chair", "go to the kitchen" | Terminal TUI |
 
+![Go2 CLI Screenshot](assets/tui.png)
+
 ---
 
 ## Quick Start
@@ -69,8 +71,6 @@ python go2_mcp_server.py --stdio
 ### 2. CLI — Natural Language TUI
 
 A full-screen terminal UI for conversational robot control with embedded camera feed.
-
-![Go2 CLI Screenshot](assets/tui.png)
 
 ```bash
 python cli.py --ip 10.0.0.200 --model qwen3.5:35b
