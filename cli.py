@@ -745,11 +745,22 @@ async def process_turn(
             log(f"  ✓ {result}")
             tool_results.append({"tool": name, "result": result})
 
-        # Feed results back — use "tool" role which Ollama supports
-        history.append({
+        # Attach a fresh camera frame + state to every tool result so the model
+        # has visual feedback between every action in the agentic loop.
+        fresh_frame = _get_frame_b64(cam_quality) if use_camera else None
+        fresh_state = _state_summary()
+        tool_msg: dict = {
             "role": "tool",
-            "content": json.dumps(tool_results),
-        })
+            "content": (
+                json.dumps(tool_results)
+                + f"\n[Robot state: {json.dumps(fresh_state)}]"
+                + ("\n[Camera frame attached — look at this before deciding next action]"
+                   if fresh_frame else "\n[No camera]")
+            ),
+        }
+        if fresh_frame:
+            tool_msg["images"] = [fresh_frame]
+        history.append(tool_msg)
 
     return "Reached maximum tool iterations."
 
@@ -775,7 +786,7 @@ MOVEMENT RULES — follow these exactly:
 
 DECISION RULES:
 - Be decisive. Pick the best action and do it. Don't hedge with tiny test moves.
-- Only use the camera to assess the scene BEFORE acting, not to verify after every tiny step
+- A fresh camera frame is provided after EVERY tool call — always look at it before deciding the next action
 - If the robot looks fallen (rpy pitch/roll > 0.5 rad), use stance(recovery_stand) first
 - After completing actions, give a single brief response describing what you did"""
 
