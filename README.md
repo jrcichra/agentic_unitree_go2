@@ -1,7 +1,5 @@
 # 🤖 Go2 Agentic Robotics Control
 
-**Build autonomous agents. Command the future.**
-
 Control your Unitree Go2 robot dog entirely through natural language — no code, no buttons, just type. This toolkit gives you two powerful ways to interact with your robot:
 
 | Tool | Best For | Interface |
