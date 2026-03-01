@@ -1,0 +1,7 @@
+mcp
+mcp[cli]
+git+https://github.com/jrcichra/unitree_webrtc_connect.git@justin
+uvicorn
+starlette
+opencv-python-headless
+numpy
