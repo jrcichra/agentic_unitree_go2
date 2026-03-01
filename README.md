@@ -5,6 +5,8 @@ Control your Unitree Go2 robot dog entirely through natural language — no code
 Built on [unitree_webrtc_connect](https://github.com/legion1581/unitree_webrtc_connect) for WebRTC communication. Thanks to [@legion1581](https://github.com/legion1581) for the great library!
 
 > This project was built with assistance from Claude.ai, Grok, and MiniMax M2.5.
+> 
+> **Disclaimer:** This software controls a real robot. Use at your own risk — I'm not responsible if your Go2 puts a hole in your drywall, trips over your cat, or does anything else dumb.
 
 | Tool | Best For | Interface |
 |------|----------|-----------|
