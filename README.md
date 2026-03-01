@@ -131,3 +131,11 @@ python cli.py --no-camera  # for headless operation
 - **TUI**: Textual framework with inline image rendering via terminal escape sequences
 - **LLM**: Ollama with configurable model (Qwen3, DeepSeek-R1, LLaVA, etc.)
 - **Shared**: Error handler patch fixes broken unpacking in unitree_webrtc_connect library
+
+---
+
+## Todo
+
+- [ ] Audio playback (speakers)
+- [ ] Audio recording (microphone)
+- [ ] Text to speech
