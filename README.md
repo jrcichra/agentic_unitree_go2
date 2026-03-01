@@ -71,11 +71,15 @@ python cli.py --no-camera  # for headless operation
 ```
 
 **Features:**
-- **Live camera view**: iTerm2/Kitty inline images (Alacritty, WezTerm, iTerm2) or half-block fallback
-- **Agentic AI control**: Powered by Ollama with Qwen3/DeepSeek-R1 thinking mode — model autonomously plans and executes, adapting after each action based on fresh camera feedback
-- **Natural language commands**: "walk forward 1 metre", "turn left 90 degrees", "find the red chair", "do a front flip"
-- **Real-time feedback**: Live robot state (position, velocity, battery, LiDAR distances) with thinking visualization
-- **Rich conversation history**: Scrollable view with markup highlighting
+- **Live camera feed**: iTerm2/Kitty inline images (Alacritty, WezTerm, iTerm2) or half-block ASCII art fallback
+- **Agentic control loop**: Model receives fresh camera frame after every action — it sees what the robot sees and adapts its next move accordingly
+- **Thinking mode**: Qwen3/DeepSeek-R1 reasoning visible in real-time
+- **Natural language**: "walk forward 1 metre", "turn left 90°", "find the red chair", "do a front flip"
+- **Full-state telemetry**: Position, velocity, battery %, orientation (RPY), gait type, LiDAR obstacle distances
+- **Autonomous tool calling**: move, turn, stance poses, tricks (flips, dances, waves), LED control, speed adjustment
+- **Multi-model support**: Switch between any Ollama model on the fly (`model qwen3.5:35b`)
+- **Conversation history**: Scrollable chat with rich markup highlighting
+- **Error panel**: Toggleable view for debugging connection/command issues
 
 **Keyboard shortcuts:**
 - `Enter` — Send command
