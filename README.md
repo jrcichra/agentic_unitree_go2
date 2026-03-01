@@ -5,7 +5,7 @@ Control your Unitree Go2 robot dog entirely through natural language — no code
 | Tool | Best For | Interface |
 |------|----------|-----------|
 | **`go2_mcp_server.py`** | AI assistants (OpenWebUI, Claude Desktop) | 50+ MCP tools |
-| **`cli.py`** | Chat with your robot, see through its eyes | Terminal TUI |
+| **`cli.py`** | Assign tasks — "find the red chair", "go to the kitchen" | Terminal TUI |
 
 ---
 
