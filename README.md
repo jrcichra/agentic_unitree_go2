@@ -70,6 +70,8 @@ python go2_mcp_server.py --stdio
 
 A full-screen terminal UI for conversational robot control with embedded camera feed.
 
+![Go2 CLI Screenshot](assets/tui.png)
+
 ```bash
 python cli.py --ip 10.0.0.200 --model qwen3.5:35b
 python cli.py --no-camera  # for headless operation
