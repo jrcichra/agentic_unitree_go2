@@ -31,10 +31,46 @@ import io
 
 warnings.filterwarnings("ignore")
 os.environ["TERM_IMAGE_LOG_LEVEL"] = "error"
-# Suppress noisy aiortc H264 decode warnings
-logging.getLogger("aiortc").setLevel(logging.ERROR)
-logging.getLogger("aiortc.codecs.h264").setLevel(logging.ERROR)
-logging.getLogger("aioice").setLevel(logging.ERROR)
+
+# ── Capture stderr in-memory so errors show inside the TUI, not on raw terminal ─
+class _ErrorCapture(io.StringIO):
+    """Intercepts stderr writes and routes them to the TUI error panel."""
+    MAX = 20  # keep last N error lines
+
+    def __init__(self):
+        super().__init__()
+        self._lines: list[str] = []
+        self._app = None  # set after TUI starts
+
+    def write(self, s: str) -> int:
+        if s.strip():
+            for line in s.rstrip().splitlines():
+                self._lines.append(line)
+            self._lines = self._lines[-self.MAX:]
+            if self._app is not None:
+                try:
+                    self._app.call_from_thread(self._app.push_error, s.rstrip())
+                except Exception:
+                    pass
+        return len(s)
+
+    def flush(self):
+        pass
+
+_err_capture = _ErrorCapture()
+sys.stderr = _err_capture
+
+# Suppress noisy aiortc / aioice logging
+logging.getLogger("aiortc").setLevel(logging.CRITICAL)
+logging.getLogger("aiortc.codecs.h264").setLevel(logging.CRITICAL)
+logging.getLogger("aioice").setLevel(logging.CRITICAL)
+logging.getLogger("aioice.stun").setLevel(logging.CRITICAL)
+logging.getLogger("asyncio").setLevel(logging.CRITICAL)
+logging.basicConfig(
+    stream=_err_capture,
+    level=logging.WARNING,
+    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+)
 
 import requests
 from PIL import Image
@@ -849,7 +885,9 @@ async def process_turn(
             try:
                 result = await run_tool(name, args)
             except Exception as e:
-                result = f"error: {e}"
+                import traceback
+                traceback.print_exc()  # goes to log file, not terminal
+                result = f"error: {type(e).__name__}: {e}"
             log(f"  ✓ {result}")
             tool_results.append({"tool": name, "result": result})
 
@@ -989,6 +1027,56 @@ Screen {
     content-align: left middle;
 }
 
+/* ── Error panel ── */
+#error-panel {
+    height: auto;
+    max-height: 6;
+    background: $error 15%;
+    border-top: solid $error;
+    padding: 0 1;
+    display: none;
+}
+
+#error-panel.visible {
+    display: block;
+}
+
+#error-log {
+    width: 100%;
+    height: auto;
+    scrollbar-size: 1 1;
+}
+
+/* ── Overlay screens (help / prompt viewer) ── */
+.overlay {
+    width: 80%;
+    height: 80%;
+    background: $surface;
+    border: double $accent;
+    padding: 1 2;
+    layer: overlay;
+    offset: 10% 10%;
+}
+
+.overlay-title {
+    text-style: bold;
+    color: $accent;
+    height: 1;
+    margin-bottom: 1;
+}
+
+.overlay ScrollableContainer {
+    height: 1fr;
+    scrollbar-size: 1 1;
+}
+
+.overlay .close-hint {
+    height: 1;
+    color: $text-muted;
+    content-align: right middle;
+    margin-top: 1;
+}
+
 #user-input {
     height: 3;
 }
@@ -1064,13 +1152,108 @@ class InlineCameraWidget(Static):
             pass  # silently degrade to halfblock
 
 
+HELP_TEXT = """
+╔══════════════════════════════════════════════════════════════════╗
+║                    GO2 NATURAL LANGUAGE CLI                       ║
+╚══════════════════════════════════════════════════════════════════╝
+
+MOVEMENT
+  "walk forward 1 metre"         move(x=1.0)
+  "back up half a metre"         move(x=-0.5)
+  "strafe left"                  move(y=0.5)
+  "turn left 90 degrees"         turn(degrees=90)
+  "spin around"                  turn(degrees=180)
+  "turn to face the door"        auto-navigates with camera
+
+SEARCH & NAVIGATION
+  "find the red chair"           spins, checks camera each step
+  "go to the kitchen"            moves + turns toward target
+  "what do you see?"             describe current camera view
+  "look around and describe the room"
+
+STANCES & POSES
+  "stand up"  /  "sit down"  /  "lie down"
+  "recovery stand"               if robot has fallen
+  "balance stand"                stable upright position
+
+TRICKS  (say any of these naturally)
+  hello / wave            stretch            wiggle hips
+  scrape / paw            wallow             show heart
+  dance 1 / dance 2       front flip         backflip
+  left flip / right flip  handstand          front jump
+  front pounce
+
+LED
+  "set led to blue"              led(r=0, g=0, b=255)
+  "turn off the lights"          led(r=0, g=0, b=0)
+  "flash red for 2 seconds"      led(r=255, g=0, b=0, duration=2)
+
+SPEED
+  "move faster"                  set_speed(level=2)   (0=slow 1=normal 2=fast)
+  "slow down"                    set_speed(level=0)
+
+LOOK / CAMERA
+  "what's in front of you?"      attaches camera frame to next query
+  "describe what you see"
+
+ROBOT STATE  (F1 or type 'state')
+  Shows position, velocity, battery %, rpy, gait type, LiDAR distances
+
+KEYBOARD SHORTCUTS
+  Enter          Send command
+  Ctrl+L         Clear conversation history
+  Ctrl+E         Toggle error panel
+  F1             Show robot state in chat
+  F2             This help screen
+  F3             Show current system prompt
+  Ctrl+C         Quit (stops robot first)
+
+BUILT-IN TEXT COMMANDS
+  state          Print robot state
+  clear          Clear conversation
+  model <name>   Switch Ollama model (e.g. model llava)
+"""
+
+from textual.screen import ModalScreen
+
+
+class HelpScreen(ModalScreen):
+    """F2 — full help overlay."""
+    BINDINGS = [("escape", "dismiss", "Close"), ("f2", "dismiss", "Close")]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="overlay"):
+            yield Static("[bold cyan]GO2 CLI — Help[/bold cyan]  (Esc to close)", classes="overlay-title")
+            with ScrollableContainer():
+                yield Static(HELP_TEXT, markup=False)
+
+    def on_key(self, event) -> None:
+        self.dismiss()
+
+
+class PromptScreen(ModalScreen):
+    """F3 — system prompt viewer."""
+    BINDINGS = [("escape", "dismiss", "Close"), ("f3", "dismiss", "Close")]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="overlay"):
+            yield Static("[bold cyan]Current System Prompt[/bold cyan]  (Esc to close)", classes="overlay-title")
+            with ScrollableContainer():
+                yield Static(SYSTEM_PROMPT, markup=False)
+
+    def on_key(self, event) -> None:
+        self.dismiss()
+
 class Go2App(App):
     CSS = CSS
     TITLE = "Go2 CLI"
     BINDINGS = [
         ("ctrl+c", "quit", "Quit"),
         ("ctrl+l", "clear_chat", "Clear chat"),
-        ("f1", "show_state", "Robot state"),
+        ("ctrl+e", "toggle_errors", "Errors"),
+        ("f1", "show_state", "State"),
+        ("f2", "show_help", "Help"),
+        ("f3", "show_prompt", "Prompt"),
     ]
 
     def __init__(self, args: argparse.Namespace):
@@ -1100,15 +1283,21 @@ class Go2App(App):
                 yield Label(" 📷 Camera ", id="camera-title")
                 yield InlineCameraWidget(id="camera-view")
 
+        # Error panel (hidden until errors arrive)
+        with Vertical(id="error-panel"):
+            yield RichLog(id="error-log", highlight=False, markup=True, wrap=True,
+                          auto_scroll=True, max_lines=20)
+
         # Input area
         with Vertical(id="input-area"):
             yield Label(
-                "Enter: send  |  Ctrl+L: clear  |  F1: state  |  Ctrl+C: quit",
+                "Enter: send  │  Ctrl+L: clear  │  Ctrl+E: errors  │  F1: state  │  F2: help  │  F3: prompt  │  Ctrl+C: quit",
                 id="hint-label",
             )
             yield Input(placeholder="Type a command...", id="user-input")
 
     def on_mount(self) -> None:
+        _err_capture._app = self  # wire up error capture to this app instance
         self.log_chat("[bold cyan]Go2 CLI[/bold cyan] ready. "
                       f"Model: [yellow]{self.model}[/yellow]  "
                       f"Ollama: [dim]{self.ollama_url}[/dim]")
@@ -1148,6 +1337,32 @@ class Go2App(App):
         self._stream_line_written = False  # new non-stream line resets stream state
 
 
+
+    def push_error(self, msg: str) -> None:
+        """Receive an error string and show it in the error panel."""
+        panel = self.query_one("#error-panel")
+        panel.add_class("visible")
+        log = self.query_one("#error-log", RichLog)
+        # Show only the most relevant line (last non-empty line of traceback)
+        lines = [l for l in msg.splitlines() if l.strip()]
+        display = lines[-1] if lines else msg
+        log.write(Text.from_markup(f"[bold red]ERR[/bold red] [dim]{escape(display)}[/dim]"))
+
+    def action_toggle_errors(self) -> None:
+        """Ctrl+E — toggle error panel visibility."""
+        panel = self.query_one("#error-panel")
+        if "visible" in panel.classes:
+            panel.remove_class("visible")
+        else:
+            panel.add_class("visible")
+
+    def action_show_help(self) -> None:
+        """F2 — show help overlay."""
+        self.push_screen(HelpScreen())
+
+    def action_show_prompt(self) -> None:
+        """F3 — show system prompt overlay."""
+        self.push_screen(PromptScreen())
 
     def action_clear_chat(self) -> None:
         self.history = [{"role": "system", "content": SYSTEM_PROMPT}]
