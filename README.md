@@ -1,8 +1,8 @@
 # 🤖 Go2 Agentic Robotics Control
 
-**Speak to your robot. Build autonomous agents. Command the future.**
+**Build autonomous agents. Command the future.**
 
-Control your Unitree Go2 robot dog entirely through natural language — no code, no buttons, just talk. This toolkit gives you two powerful ways to interact with your robot:
+Control your Unitree Go2 robot dog entirely through natural language — no code, no buttons, just type. This toolkit gives you two powerful ways to interact with your robot:
 
 | Tool | Best For | Interface |
 |------|----------|-----------|
@@ -56,7 +56,7 @@ python go2_mcp_server.py --stdio
 - **Acrobatics**: `flip(front|back|left|right)`, `handstand`, `front_jump`, `front_pounce`, `wiggle_hips`
 - **Motion mode**: `set_motion_mode(normal|ai|obstacle_avoidance)`, `get_motion_mode`
 - **Telemetry**: `get_sport_state`, `get_low_state`, `get_multiple_state`, `get_robot_state`
-- **VUI**: `set_led_color`, `set_brightness(0-10)`, `set_volume(0-10)`
+- **VUI**: `set_led_color`, `set_brightness(0-10)`
 - **Sensors**: `lidar_snapshot()` — point cloud + bounding box, `capture_image(quality=1-100)` — base64 JPEG
 
 > **Firmware 1.1.7+ (MCF mode):** The server automatically handles MCF unified mode. Acrobatics work directly — error 7004 is expected and handled gracefully.
