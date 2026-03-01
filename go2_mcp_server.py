@@ -646,12 +646,23 @@ _FLIP_MAP = {
 # ---------------------------------------------------------------------------
 
 @server.call_tool()
-async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
+async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent | types.ImageContent]:
     conn = await get_conn()
     try:
         result = await _dispatch(conn, name, arguments)
     except Exception as e:
         result = {"error": str(e)}
+
+    # capture_image returns a dict with image_base64 — emit as ImageContent
+    # so vision-capable models receive it as actual image input, not base64 text
+    if isinstance(result, dict) and result.get("status") == "ok" and "image_base64" in result:
+        b64 = result.pop("image_base64")
+        meta = json.dumps({k: v for k, v in result.items()}, indent=2)
+        return [
+            types.ImageContent(type="image", data=b64, mimeType="image/jpeg"),
+            types.TextContent(type="text", text=meta),
+        ]
+
     return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
 
