@@ -366,7 +366,17 @@ def _state_summary() -> dict:
         "gait": s.get("gait_type", 0),
         "battery_pct": l.get("bms_state", {}).get("soc", "?"),
         "battery_v": l.get("bms_state", {}).get("voltage", "?"),
+        # range_obstacle: [front, left, right, back] obstacle distances from LiDAR (metres)
+        # 0 or negative means no obstacle / sensor not reporting
+        "range_obstacle": s.get("range_obstacle", [0, 0, 0, 0]),
     }
+
+def _forward_obstacle_m() -> float:
+    """Return forward obstacle distance in metres. 0 means no reading."""
+    r = _sport_state.get("range_obstacle", [0, 0, 0, 0])
+    if isinstance(r, list) and len(r) > 0:
+        return float(r[0])
+    return 0.0
 
 # ---------------------------------------------------------------------------
 # Tool definitions
@@ -377,7 +387,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "move",
-            "description": "Move the robot by displacement. x=forward/back metres, y=left/right metres, z=yaw radians.",
+            "description": "Move the robot by displacement. x=forward/back metres, y=left/right metres. Do NOT use z for rotation — use the turn() tool instead which handles rotation correctly.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -392,7 +402,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "turn",
-            "description": "Turn the robot. degrees: positive=left, negative=right.",
+            "description": "Turn the robot in place. degrees: positive=left/CCW, negative=right/CW. Handles any angle including 90, 180, 360. Always use this for rotation, never move(z=...).",
             "parameters": {
                 "type": "object",
                 "properties": {"degrees": {"type": "number"}},
@@ -492,19 +502,90 @@ TOOLS = [
 # Execute a single tool call
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Velocity-loop helper — Move API sends velocity (m/s, rad/s), not displacement.
+# Must be called repeatedly at ~20ms to keep robot moving.
+# ---------------------------------------------------------------------------
+MOVE_TICK_HZ = 25          # send rate in Hz
+MOVE_TICK_S   = 1.0 / MOVE_TICK_HZ
+
+# Minimum safe forward distance (metres). Robot stops if LiDAR sees closer obstacle.
+# Go2 LiDAR has ~0.1m minimum range so anything under 0.35m is "about to hit"
+OBSTACLE_STOP_M = 0.35
+
+async def _velocity_loop(vx: float, vy: float, vyaw: float, duration_s: float) -> bool:
+    """
+    Send Move velocity commands in a loop for duration_s seconds.
+    Stops early if LiDAR detects a forward obstacle within OBSTACLE_STOP_M.
+    Only checks obstacle distance for forward motion (vx > 0).
+    """
+    ticks = max(1, int(duration_s * MOVE_TICK_HZ))
+    ok = True
+    stopped_early = False
+    for _ in range(ticks):
+        # Obstacle guard: only for forward motion
+        if vx > 0:
+            dist = _forward_obstacle_m()
+            if 0 < dist < OBSTACLE_STOP_M:
+                stopped_early = True
+                break
+        r = await _mcf("Move", {"x": vx, "y": vy, "z": vyaw})
+        if not r.get("ok", False):
+            ok = False
+        await asyncio.sleep(MOVE_TICK_S)
+    # Send stop
+    await _mcf("Move", {"x": 0, "y": 0, "z": 0})
+    if stopped_early:
+        return "obstacle"  # caller can check for this
+    return ok
+
+
 async def run_tool(name: str, args: dict) -> str:
     if name == "move":
-        x = max(-0.8, min(0.8, float(args.get("x", 0))))
-        y = max(-0.4, min(0.4, float(args.get("y", 0))))
-        z = max(-1.2, min(1.2, float(args.get("z", 0))))
-        r = await _mcf("Move", {"x": x, "y": y, "z": z})
-        return f"move({x:.2f}, {y:.2f}, {z:.2f}) → {'ok' if r['ok'] else 'error ' + str(r['code'])}"
+        # x/y are distances in metres; z is yaw in radians
+        # Convert to velocity commands with appropriate durations
+        # Walk speed ~0.5 m/s, yaw rate ~0.8 rad/s
+        WALK_SPEED  = 0.5   # m/s
+        STRAFE_SPEED = 0.3  # m/s
+        YAW_RATE    = 0.8   # rad/s
+
+        x = float(args.get("x", 0))
+        y = float(args.get("y", 0))
+        z = float(args.get("z", 0))  # discouraged but handle it
+
+        errors = []
+        # Handle x (forward/back)
+        if abs(x) > 0.01:
+            dur = abs(x) / WALK_SPEED
+            result = await _velocity_loop(WALK_SPEED * (1 if x > 0 else -1), 0, 0, dur)
+            if result == "obstacle":
+                return f"move(x={x:.2f}m) → stopped: obstacle detected within {OBSTACLE_STOP_M}m"
+            if not result: errors.append("x")
+            await asyncio.sleep(0.2)
+        # Handle y (strafe left/right)
+        if abs(y) > 0.01:
+            dur = abs(y) / STRAFE_SPEED
+            ok = await _velocity_loop(0, STRAFE_SPEED * (1 if y > 0 else -1), 0, dur)
+            if not ok: errors.append("y")
+            await asyncio.sleep(0.2)
+        # Handle z (yaw) if someone passes it directly
+        if abs(z) > 0.01:
+            dur = abs(z) / YAW_RATE
+            ok = await _velocity_loop(0, 0, YAW_RATE * (1 if z > 0 else -1), dur)
+            if not ok: errors.append("z")
+
+        status = "ok" if not errors else f"errors on {errors}"
+        return f"move(x={x:.2f}m, y={y:.2f}m) → {status}"
 
     elif name == "turn":
         deg = float(args.get("degrees", 0))
-        rad = deg * 3.14159 / 180.0
-        r = await _mcf("Move", {"x": 0, "y": 0, "z": rad})
-        return f"turn({deg:.1f}°) → {'ok' if r['ok'] else 'error'}"
+        rad = abs(deg) * 3.14159 / 180.0
+        YAW_RATE = 0.8  # rad/s — comfortable turn speed
+        duration = rad / YAW_RATE
+        sign = 1.0 if deg > 0 else -1.0
+        ok = await _velocity_loop(0, 0, YAW_RATE * sign, duration)
+        status = "ok" if ok else "error"
+        return f"turn({deg:.1f}°, {duration:.1f}s) → {status}"
 
     elif name == "stance":
         pose_map = {
@@ -596,6 +677,7 @@ def _ollama_chat(
         "messages": messages,
         "stream": True,
         "options": {"temperature": 0.2},
+        "think": True,   # enable Qwen3 / DeepSeek-R1 thinking mode
         "tools": TOOLS,
     }
 
@@ -613,6 +695,7 @@ def _ollama_chat(
         raise TimeoutError("Ollama request timed out after 120s")
 
     content_parts = []
+    thinking_parts = []
     tool_calls = []
 
     for line in resp.iter_lines():
@@ -624,11 +707,19 @@ def _ollama_chat(
             continue
 
         msg = data.get("message", {})
+
+        # Ollama 0.7+ streams thinking tokens in a separate "thinking" field
+        think_chunk = msg.get("thinking", "")
+        if think_chunk:
+            thinking_parts.append(think_chunk)
+            if token_fn:
+                token_fn(("think", think_chunk))
+
         chunk = msg.get("content", "")
         if chunk:
             content_parts.append(chunk)
             if token_fn:
-                token_fn(chunk)
+                token_fn(("content", chunk))
 
         # Ollama delivers tool_calls as a complete list in one chunk (not streamed)
         if msg.get("tool_calls"):
@@ -637,6 +728,7 @@ def _ollama_chat(
     return {
         "role": "assistant",
         "content": "".join(content_parts),
+        "thinking": "".join(thinking_parts),
         "tool_calls": tool_calls,
     }
 
@@ -649,17 +741,23 @@ def _trim_history(history: list[dict]) -> list[dict]:
     system = [m for m in history if m.get("role") == "system"]
     turns = [m for m in history if m.get("role") != "system"]
 
-    # Strip images from all but the most recent user message
+    # Each agentic step now produces: assistant + tool + user(camera obs)
+    # = 3 messages per step, plus original user message = 4 per turn
+    # Keep last N turns worth of messages
+    max_msgs = MAX_HISTORY_TURNS * 4
+    if len(turns) > max_msgs:
+        turns = turns[-max_msgs:]
+
+    # Strip images from all user messages except the 2 most recent
+    # (keep latest camera obs + the one before so model has context)
+    user_indices = [i for i, m in enumerate(turns) if m.get("role") == "user" and "images" in m]
+    keep_image_indices = set(user_indices[-2:])  # keep last 2 camera frames
+
     trimmed = []
     for i, m in enumerate(turns):
-        if m.get("role") == "user" and i < len(turns) - 1:
-            # Remove images key from older user messages
+        if m.get("role") == "user" and "images" in m and i not in keep_image_indices:
             m = {k: v for k, v in m.items() if k != "images"}
         trimmed.append(m)
-
-    # Keep only recent turns
-    if len(trimmed) > MAX_HISTORY_TURNS * 3:  # 3 messages per turn (user/assistant/tool)
-        trimmed = trimmed[-(MAX_HISTORY_TURNS * 3):]
 
     return system + trimmed
 
@@ -718,6 +816,16 @@ async def process_turn(
         assistant_msg["role"] = "assistant"
         history.append(assistant_msg)
 
+        # Show thinking tokens if present
+        thinking = assistant_msg.get("thinking", "").strip()
+        if thinking and log_fn:
+            # Indent and truncate thinking for display — it can be very long
+            lines = thinking.splitlines()
+            preview = "\n    ".join(lines[:8])  # show up to 8 lines
+            if len(lines) > 8:
+                preview += f"\n    … ({len(lines) - 8} more lines)"
+            log_fn(f"[dim italic]💭 {preview}[/dim italic]")
+
         tool_calls = assistant_msg.get("tool_calls", [])
 
         if not tool_calls:
@@ -745,22 +853,29 @@ async def process_turn(
             log(f"  ✓ {result}")
             tool_results.append({"tool": name, "result": result})
 
-        # Attach a fresh camera frame + state to every tool result so the model
-        # has visual feedback between every action in the agentic loop.
+        # Ollama ignores images on role:tool messages — vision only works on role:user.
+        # So: append a plain tool result, then inject a user observation message
+        # with the fresh camera frame so the model actually sees it.
         fresh_frame = _get_frame_b64(cam_quality) if use_camera else None
         fresh_state = _state_summary()
-        tool_msg: dict = {
+
+        history.append({
             "role": "tool",
+            "content": json.dumps(tool_results),
+        })
+
+        # Camera observation injected as a user message so Ollama processes the image
+        obs_msg: dict = {
+            "role": "user",
             "content": (
-                json.dumps(tool_results)
-                + f"\n[Robot state: {json.dumps(fresh_state)}]"
-                + ("\n[Camera frame attached — look at this before deciding next action]"
-                   if fresh_frame else "\n[No camera]")
+                f"[After action — Robot state: {json.dumps(fresh_state)}]"
+                + ("\n[Current camera view attached — what do you see? Use this to decide your next action.]"
+                   if fresh_frame else "\n[No camera available]")
             ),
         }
         if fresh_frame:
-            tool_msg["images"] = [fresh_frame]
-        history.append(tool_msg)
+            obs_msg["images"] = [fresh_frame]
+        history.append(obs_msg)
 
     return "Reached maximum tool iterations."
 
@@ -771,24 +886,30 @@ async def process_turn(
 SYSTEM_PROMPT = """You are controlling a Unitree Go2 robot dog via tool calls.
 The user gives natural language instructions. Execute them decisively and efficiently.
 
-You receive:
-- A camera image showing what the robot sees (when available)
-- The robot's current state (position, battery, etc.)
-- The user's instruction
+HOW THE LOOP WORKS — this is critical to understand:
+- You issue ONE tool call at a time. After each tool call completes, you receive a fresh camera frame and updated robot state before deciding what to do next.
+- This means you can and should adapt after each action — if you turned and now see your target, stop turning and move toward it. If you moved and hit an obstacle, reassess.
+- Do NOT batch multiple tool calls in a single response hoping they'll all succeed — you have eyes between every step, use them.
+- Each response should contain exactly ONE tool call, then stop and wait for the camera feedback.
 
-MOVEMENT RULES — follow these exactly:
-- move() takes displacement in metres: x=forward/back, y=left/right, z=yaw radians
-- Hard limits (enforced by code): |x|≤0.8m, |y|≤0.4m per call — the robot moves at a SLOW walking pace
-- Each move() call covers 0.3–0.8m at normal walking speed — this feels natural, do not try to rush
-- "a few steps" = move(x=0.5), "walk forward" = chain 2–3 x move(x=0.8) calls, "back up" = move(x=-0.4)
-- Chain tool calls in ONE response when a task needs multiple actions (turn THEN move, etc.)
-- If the user wants to go far, chain multiple move(x=0.8) calls in sequence — do NOT use tiny 0.1–0.2m moves
+MOVEMENT RULES:
+- move(x, y) — x=metres forward/back, y=left/right strafe. Code runs a timed velocity loop at real walking speed.
+- turn(degrees) — positive=left/CCW, negative=right/CW. Never use move(z=...) for rotation.
+- Good increments: turn(45) or turn(90) to scan, move(x=0.5) to move(x=1.5) for walking.
+- Do NOT use tiny increments like move(x=0.1) or turn(5) — use natural human-scale steps.
 
-DECISION RULES:
-- Be decisive. Pick the best action and do it. Don't hedge with tiny test moves.
-- A fresh camera frame is provided after EVERY tool call — always look at it before deciding the next action
-- If the robot looks fallen (rpy pitch/roll > 0.5 rad), use stance(recovery_stand) first
-- After completing actions, give a single brief response describing what you did"""
+SEARCH BEHAVIOUR:
+- To find something: turn in increments (45–90°), check the camera after each turn, stop when you see the target.
+- To approach something: alternate move(x=0.5–1.0) steps with camera checks. Stop when close enough.
+- Describe what you see in the camera after each step so the user knows what's happening.
+
+SAFETY:
+- If the robot looks fallen (rpy pitch/roll > 0.5 rad), use stance(recovery_stand) first.
+- If a move() returns "obstacle detected", reassess with camera before trying again.
+
+RESPONSE FORMAT:
+- After a tool call completes: briefly describe what you see and what you're doing next (1–2 sentences).
+- When the task is fully done: say so clearly and stop issuing tool calls."""
 
 # ---------------------------------------------------------------------------
 # Textual TUI
@@ -1074,13 +1195,15 @@ class Go2App(App):
         self.call_from_thread(self._set_processing, True)
 
         def log_progress(msg):
-            # Only plain status strings now (thinking, tool calls, etc.)
-            if isinstance(msg, str):
+            if not isinstance(msg, str):
+                return
+            # Thinking lines already have full Rich markup — pass through as-is
+            if msg.startswith("[dim italic]💭"):
+                _main_loop.call_soon_threadsafe(self.log_chat, f"  {msg}")
+            else:
                 _main_loop.call_soon_threadsafe(
                     self.log_chat, f"[dim]  {escape(msg)}[/dim]"
                 )
-            # tuple messages (stream/stream_end) are intentionally ignored here
-            # — the full response is written at once after process_turn returns
 
         # Robot coroutines must run on the main loop (where WebRTC lives).
         # Ollama HTTP is synchronous (requests), so process_turn is safe to
