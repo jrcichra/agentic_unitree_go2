@@ -13,7 +13,7 @@ Install:
 
 Run:
     python go2_cli.py
-    python go2_cli.py --ip 10.0.0.207 --model llava
+    python go2_cli.py --ip 10.0.0.200 --model llava
     python go2_cli.py --no-camera
 """
 
@@ -32,9 +32,11 @@ import io
 warnings.filterwarnings("ignore")
 os.environ["TERM_IMAGE_LOG_LEVEL"] = "error"
 
+
 # ── Capture stderr in-memory so errors show inside the TUI, not on raw terminal ─
 class _ErrorCapture(io.StringIO):
     """Intercepts stderr writes and routes them to the TUI error panel."""
+
     MAX = 20  # keep last N error lines
 
     def __init__(self):
@@ -46,7 +48,7 @@ class _ErrorCapture(io.StringIO):
         if s.strip():
             for line in s.rstrip().splitlines():
                 self._lines.append(line)
-            self._lines = self._lines[-self.MAX:]
+            self._lines = self._lines[-self.MAX :]
             if self._app is not None:
                 try:
                     self._app.call_from_thread(self._app.push_error, s.rstrip())
@@ -56,6 +58,7 @@ class _ErrorCapture(io.StringIO):
 
     def flush(self):
         pass
+
 
 _err_capture = _ErrorCapture()
 sys.stderr = _err_capture
@@ -78,6 +81,7 @@ from PIL import Image
 try:
     import cv2
     import numpy as np
+
     _CV2 = True
 except ImportError:
     cv2 = None
@@ -89,9 +93,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 try:
     from textual.app import App, ComposeResult
-    from textual.widgets import (
-        RichLog, Input, Static, Label, Header, Footer
-    )
+    from textual.widgets import RichLog, Input, Static, Label, Header, Footer
     from textual.containers import Horizontal, Vertical, ScrollableContainer
     from textual.reactive import reactive
     from textual import work
@@ -99,6 +101,7 @@ try:
     from rich.panel import Panel
     from rich.console import Console
     from rich.markup import escape
+
     _TEXTUAL = True
 except ImportError:
     _TEXTUAL = False
@@ -118,6 +121,7 @@ except ImportError:
 # Monkey-patch library error handler
 try:
     from unitree_webrtc_connect.msgs import error_handler as _eh
+
     def _safe(error):
         if not isinstance(error, (list, tuple)) or len(error) != 3:
             return
@@ -125,6 +129,7 @@ try:
             ts, src, code = error
         except Exception:
             pass
+
     _eh.handle_error = _safe
 except Exception:
     pass
@@ -144,6 +149,7 @@ _main_loop: "asyncio.AbstractEventLoop | None" = None
 # ---------------------------------------------------------------------------
 # Low-level helpers
 # ---------------------------------------------------------------------------
+
 
 def _code(resp: dict | None) -> int:
     if resp is None:
@@ -173,7 +179,9 @@ async def _mcf(name: str, parameter: dict | None = None, timeout: float = 5.0) -
     return {"ok": code == 0, "code": code}
 
 
-async def _mcf_raw(api_id: int, parameter: dict | None = None, timeout: float = 5.0) -> dict:
+async def _mcf_raw(
+    api_id: int, parameter: dict | None = None, timeout: float = 5.0
+) -> dict:
     payload: dict = {"api_id": api_id}
     if parameter:
         payload["parameter"] = parameter
@@ -189,9 +197,11 @@ async def _mcf_raw(api_id: int, parameter: dict | None = None, timeout: float = 
     code = _code(resp)
     return {"ok": code == 0, "code": code}
 
+
 # ---------------------------------------------------------------------------
 # Camera
 # ---------------------------------------------------------------------------
+
 
 async def _frame_loop(track) -> None:
     global _latest_frame_jpg, _latest_frame_ts
@@ -264,11 +274,12 @@ def _get_frame_b64(quality: int = 75) -> str | None:
 # We write the image escape directly to the real tty, bypassing Textual.
 # ---------------------------------------------------------------------------
 
+
 def _detect_image_protocol() -> str:
     """Detect which inline image protocol the terminal supports."""
     kit_term = os.environ.get("KITTY_WINDOW_ID", "")
     term_prog = os.environ.get("TERM_PROGRAM", "")
-    wt_session = os.environ.get("WT_SESSION", "")          # Windows Terminal
+    wt_session = os.environ.get("WT_SESSION", "")  # Windows Terminal
     wt_profile = os.environ.get("WT_PROFILE_ID", "")
     vte = os.environ.get("VTE_VERSION", "")
 
@@ -286,13 +297,22 @@ def _detect_image_protocol() -> str:
         # But NOT in WSL with a non-supporting terminal - be conservative
         # Check we're not in a basic xterm/screen/tmux
         term = os.environ.get("TERM", "")
-        if term not in ("xterm", "xterm-256color", "screen", "screen-256color", "tmux", "tmux-256color"):
+        if term not in (
+            "xterm",
+            "xterm-256color",
+            "screen",
+            "screen-256color",
+            "tmux",
+            "tmux-256color",
+        ):
             return "iterm2"
         # xterm-256color with truecolor = probably Alacritty or similar
         return "iterm2"
     return "halfblock"  # fallback
 
+
 _IMAGE_PROTOCOL = None  # lazy init
+
 
 def _emit_inline_image(jpg_bytes: bytes, width_px: int = 400) -> None:
     """
@@ -323,14 +343,20 @@ def _emit_inline_image(jpg_bytes: bytes, width_px: int = 400) -> None:
             # Chunk into 4096-byte pieces
             seq = ""
             for i in range(0, len(data), 4096):
-                chunk = data[i:i+4096]
+                chunk = data[i : i + 4096]
                 more = "1" if i + 4096 < len(data) else "0"
                 seq += "\x1b_G" + f"a=T,f=100,m={more};" + chunk + "\x1b\\"
             return seq
         else:  # iterm2 (works in Alacritty, WezTerm, iTerm2)
             data = base64.b64encode(jpg_bytes).decode()
             size = len(jpg_bytes)
-            return "\x1b]1337;File=inline=1;size=" + str(size) + ";width=auto;height=auto;preserveAspectRatio=1:" + data + "\x07"
+            return (
+                "\x1b]1337;File=inline=1;size="
+                + str(size)
+                + ";width=auto;height=auto;preserveAspectRatio=1:"
+                + data
+                + "\x07"
+            )
     except Exception:
         return None
 
@@ -358,16 +384,29 @@ def _frame_to_rich_text(max_w: int = 76, max_h: int = 40) -> "Text":
         target_w = max_w
         target_h = max_h * 2
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        resized = cv2.resize(img_rgb, (target_w, target_h), interpolation=cv2.INTER_AREA)
+        resized = cv2.resize(
+            img_rgb, (target_w, target_h), interpolation=cv2.INTER_AREA
+        )
         t = Text(overflow="fold", no_wrap=True)
         for row in range(0, target_h - 1, 2):
             for col in range(target_w):
-                r1, g1, b1 = int(resized[row, col, 0]), int(resized[row, col, 1]), int(resized[row, col, 2])
-                r2, g2, b2 = int(resized[row + 1, col, 0]), int(resized[row + 1, col, 1]), int(resized[row + 1, col, 2])
-                t.append("▀", style=Style(
-                    color=Color.from_rgb(r1, g1, b1),
-                    bgcolor=Color.from_rgb(r2, g2, b2),
-                ))
+                r1, g1, b1 = (
+                    int(resized[row, col, 0]),
+                    int(resized[row, col, 1]),
+                    int(resized[row, col, 2]),
+                )
+                r2, g2, b2 = (
+                    int(resized[row + 1, col, 0]),
+                    int(resized[row + 1, col, 1]),
+                    int(resized[row + 1, col, 2]),
+                )
+                t.append(
+                    "▀",
+                    style=Style(
+                        color=Color.from_rgb(r1, g1, b1),
+                        bgcolor=Color.from_rgb(r2, g2, b2),
+                    ),
+                )
             t.append("\n")
         return t
     except Exception as e:
@@ -377,6 +416,7 @@ def _frame_to_rich_text(max_w: int = 76, max_h: int = 40) -> "Text":
 # ---------------------------------------------------------------------------
 # State
 # ---------------------------------------------------------------------------
+
 
 def _setup_state() -> None:
     def on_sport(m):
@@ -407,12 +447,14 @@ def _state_summary() -> dict:
         "range_obstacle": s.get("range_obstacle", [0, 0, 0, 0]),
     }
 
+
 def _forward_obstacle_m() -> float:
     """Return forward obstacle distance in metres. 0 means no reading."""
     r = _sport_state.get("range_obstacle", [0, 0, 0, 0])
     if isinstance(r, list) and len(r) > 0:
         return float(r[0])
     return 0.0
+
 
 # ---------------------------------------------------------------------------
 # Tool definitions
@@ -429,7 +471,10 @@ TOOLS = [
                 "properties": {
                     "x": {"type": "number", "description": "Forward (+) / back (-)"},
                     "y": {"type": "number", "description": "Left (+) / right (-)"},
-                    "z": {"type": "number", "description": "Yaw radians, left(+) right(-)"},
+                    "z": {
+                        "type": "number",
+                        "description": "Yaw radians, left(+) right(-)",
+                    },
                 },
             },
         },
@@ -456,8 +501,15 @@ TOOLS = [
                 "properties": {
                     "pose": {
                         "type": "string",
-                        "enum": ["stand_up", "stand_down", "balance_stand",
-                                 "recovery_stand", "sit", "stop", "back_stand"],
+                        "enum": [
+                            "stand_up",
+                            "stand_down",
+                            "balance_stand",
+                            "recovery_stand",
+                            "sit",
+                            "stop",
+                            "back_stand",
+                        ],
                     }
                 },
                 "required": ["pose"],
@@ -474,10 +526,23 @@ TOOLS = [
                 "properties": {
                     "name": {
                         "type": "string",
-                        "enum": ["hello", "stretch", "wiggle_hips", "scrape", "wallow",
-                                 "show_heart", "dance1", "dance2", "front_flip",
-                                 "back_flip", "left_flip", "right_flip", "handstand",
-                                 "front_jump", "front_pounce"],
+                        "enum": [
+                            "hello",
+                            "stretch",
+                            "wiggle_hips",
+                            "scrape",
+                            "wallow",
+                            "show_heart",
+                            "dance1",
+                            "dance2",
+                            "front_flip",
+                            "back_flip",
+                            "left_flip",
+                            "right_flip",
+                            "handstand",
+                            "front_jump",
+                            "front_pounce",
+                        ],
                     }
                 },
                 "required": ["name"],
@@ -494,7 +559,15 @@ TOOLS = [
                 "properties": {
                     "color": {
                         "type": "string",
-                        "enum": ["white", "red", "yellow", "blue", "green", "cyan", "purple"],
+                        "enum": [
+                            "white",
+                            "red",
+                            "yellow",
+                            "blue",
+                            "green",
+                            "cyan",
+                            "purple",
+                        ],
                     },
                     "duration": {"type": "integer", "description": "seconds"},
                 },
@@ -525,8 +598,11 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "level": {"type": "integer", "enum": [0, 1, 2],
-                              "description": "0=slow 1=normal 2=fast"},
+                    "level": {
+                        "type": "integer",
+                        "enum": [0, 1, 2],
+                        "description": "0=slow 1=normal 2=fast",
+                    },
                 },
                 "required": ["level"],
             },
@@ -542,12 +618,13 @@ TOOLS = [
 # Velocity-loop helper — Move API sends velocity (m/s, rad/s), not displacement.
 # Must be called repeatedly at ~20ms to keep robot moving.
 # ---------------------------------------------------------------------------
-MOVE_TICK_HZ = 25          # send rate in Hz
-MOVE_TICK_S   = 1.0 / MOVE_TICK_HZ
+MOVE_TICK_HZ = 25  # send rate in Hz
+MOVE_TICK_S = 1.0 / MOVE_TICK_HZ
 
 # Minimum safe forward distance (metres). Robot stops if LiDAR sees closer obstacle.
 # Go2 LiDAR has ~0.1m minimum range so anything under 0.35m is "about to hit"
 OBSTACLE_STOP_M = 0.35
+
 
 async def _velocity_loop(vx: float, vy: float, vyaw: float, duration_s: float) -> bool:
     """
@@ -581,9 +658,9 @@ async def run_tool(name: str, args: dict) -> str:
         # x/y are distances in metres; z is yaw in radians
         # Convert to velocity commands with appropriate durations
         # Walk speed ~0.5 m/s, yaw rate ~0.8 rad/s
-        WALK_SPEED  = 0.5   # m/s
+        WALK_SPEED = 0.5  # m/s
         STRAFE_SPEED = 0.3  # m/s
-        YAW_RATE    = 0.8   # rad/s
+        YAW_RATE = 0.8  # rad/s
 
         x = float(args.get("x", 0))
         y = float(args.get("y", 0))
@@ -596,19 +673,22 @@ async def run_tool(name: str, args: dict) -> str:
             result = await _velocity_loop(WALK_SPEED * (1 if x > 0 else -1), 0, 0, dur)
             if result == "obstacle":
                 return f"move(x={x:.2f}m) → stopped: obstacle detected within {OBSTACLE_STOP_M}m"
-            if not result: errors.append("x")
+            if not result:
+                errors.append("x")
             await asyncio.sleep(0.2)
         # Handle y (strafe left/right)
         if abs(y) > 0.01:
             dur = abs(y) / STRAFE_SPEED
             ok = await _velocity_loop(0, STRAFE_SPEED * (1 if y > 0 else -1), 0, dur)
-            if not ok: errors.append("y")
+            if not ok:
+                errors.append("y")
             await asyncio.sleep(0.2)
         # Handle z (yaw) if someone passes it directly
         if abs(z) > 0.01:
             dur = abs(z) / YAW_RATE
             ok = await _velocity_loop(0, 0, YAW_RATE * (1 if z > 0 else -1), dur)
-            if not ok: errors.append("z")
+            if not ok:
+                errors.append("z")
 
         status = "ok" if not errors else f"errors on {errors}"
         return f"move(x={x:.2f}m, y={y:.2f}m) → {status}"
@@ -690,6 +770,7 @@ async def run_tool(name: str, args: dict) -> str:
     else:
         return f"unknown tool: {name}"
 
+
 # ---------------------------------------------------------------------------
 # Ollama — fixed streaming + conversation history management
 # ---------------------------------------------------------------------------
@@ -713,7 +794,7 @@ def _ollama_chat(
         "messages": messages,
         "stream": True,
         "options": {"temperature": 0.2},
-        "think": True,   # enable Qwen3 / DeepSeek-R1 thinking mode
+        "think": True,  # enable Qwen3 / DeepSeek-R1 thinking mode
         "tools": TOOLS,
     }
 
@@ -786,7 +867,9 @@ def _trim_history(history: list[dict]) -> list[dict]:
 
     # Strip images from all user messages except the 2 most recent
     # (keep latest camera obs + the one before so model has context)
-    user_indices = [i for i, m in enumerate(turns) if m.get("role") == "user" and "images" in m]
+    user_indices = [
+        i for i, m in enumerate(turns) if m.get("role") == "user" and "images" in m
+    ]
     keep_image_indices = set(user_indices[-2:])  # keep last 2 camera frames
 
     trimmed = []
@@ -801,6 +884,7 @@ def _trim_history(history: list[dict]) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Agentic turn processor
 # ---------------------------------------------------------------------------
+
 
 async def process_turn(
     user_input: str,
@@ -880,12 +964,13 @@ async def process_turn(
                     args = {}
 
             # Show all tool calls including camera-related ones
-            args_str = json.dumps(args, separators=(',', ':')) if args else ""
+            args_str = json.dumps(args, separators=(",", ":")) if args else ""
             log(f"→ {name}({args_str})")
             try:
                 result = await run_tool(name, args)
             except Exception as e:
                 import traceback
+
                 traceback.print_exc()  # goes to log file, not terminal
                 result = f"error: {type(e).__name__}: {e}"
             log(f"  ✓ {result}")
@@ -897,18 +982,23 @@ async def process_turn(
         fresh_frame = _get_frame_b64(cam_quality) if use_camera else None
         fresh_state = _state_summary()
 
-        history.append({
-            "role": "tool",
-            "content": json.dumps(tool_results),
-        })
+        history.append(
+            {
+                "role": "tool",
+                "content": json.dumps(tool_results),
+            }
+        )
 
         # Camera observation injected as a user message so Ollama processes the image
         obs_msg: dict = {
             "role": "user",
             "content": (
                 f"[After action — Robot state: {json.dumps(fresh_state)}]"
-                + ("\n[Current camera view attached — what do you see? Use this to decide your next action.]"
-                   if fresh_frame else "\n[No camera available]")
+                + (
+                    "\n[Current camera view attached — what do you see? Use this to decide your next action.]"
+                    if fresh_frame
+                    else "\n[No camera available]"
+                )
             ),
         }
         if fresh_frame:
@@ -916,6 +1006,7 @@ async def process_turn(
         history.append(obs_msg)
 
     return "Reached maximum tool iterations."
+
 
 # ---------------------------------------------------------------------------
 # System prompt
@@ -1083,10 +1174,10 @@ Screen {
 """
 
 
-
 # ---------------------------------------------------------------------------
 # Custom camera widget — uses iTerm2/Kitty inline images or half-block fallback
 # ---------------------------------------------------------------------------
+
 
 class InlineCameraWidget(Static):
     """
@@ -1106,7 +1197,7 @@ class InlineCameraWidget(Static):
         global _IMAGE_PROTOCOL
         if _IMAGE_PROTOCOL is None:
             _IMAGE_PROTOCOL = _detect_image_protocol()
-        self._use_inline = (_IMAGE_PROTOCOL in ("iterm2", "kitty"))
+        self._use_inline = _IMAGE_PROTOCOL in ("iterm2", "kitty")
 
     def render(self):
         """Called by Textual to get the renderable for this widget."""
@@ -1133,7 +1224,11 @@ class InlineCameraWidget(Static):
                 region = self.content_region
                 # Move cursor to widget top-left and emit
                 tty_escape = (
-                    "\x1b[" + str(region.y + 1) + ";" + str(region.x + 1) + "H"  # cursor position
+                    "\x1b["
+                    + str(region.y + 1)
+                    + ";"
+                    + str(region.x + 1)
+                    + "H"  # cursor position
                     + seq
                 )
                 # Write to the actual tty fd
@@ -1219,11 +1314,15 @@ from textual.screen import ModalScreen
 
 class HelpScreen(ModalScreen):
     """F2 — full help overlay."""
+
     BINDINGS = [("escape", "dismiss", "Close"), ("f2", "dismiss", "Close")]
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="overlay"):
-            yield Static("[bold cyan]GO2 CLI — Help[/bold cyan]  (Esc to close)", classes="overlay-title")
+            yield Static(
+                "[bold cyan]GO2 CLI — Help[/bold cyan]  (Esc to close)",
+                classes="overlay-title",
+            )
             with ScrollableContainer():
                 yield Static(HELP_TEXT, markup=False)
 
@@ -1233,16 +1332,21 @@ class HelpScreen(ModalScreen):
 
 class PromptScreen(ModalScreen):
     """F3 — system prompt viewer."""
+
     BINDINGS = [("escape", "dismiss", "Close"), ("f3", "dismiss", "Close")]
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="overlay"):
-            yield Static("[bold cyan]Current System Prompt[/bold cyan]  (Esc to close)", classes="overlay-title")
+            yield Static(
+                "[bold cyan]Current System Prompt[/bold cyan]  (Esc to close)",
+                classes="overlay-title",
+            )
             with ScrollableContainer():
                 yield Static(SYSTEM_PROMPT, markup=False)
 
     def on_key(self, event) -> None:
         self.dismiss()
+
 
 class Go2App(App):
     CSS = CSS
@@ -1276,7 +1380,13 @@ class Go2App(App):
         with Horizontal(id="main-area"):
             # Chat panel (left)
             with Vertical(id="chat-panel"):
-                yield RichLog(id="chat-log", highlight=True, markup=True, wrap=True, auto_scroll=True)
+                yield RichLog(
+                    id="chat-log",
+                    highlight=True,
+                    markup=True,
+                    wrap=True,
+                    auto_scroll=True,
+                )
 
             # Camera panel (right)
             with Vertical(id="camera-panel"):
@@ -1285,8 +1395,14 @@ class Go2App(App):
 
         # Error panel (hidden until errors arrive)
         with Vertical(id="error-panel"):
-            yield RichLog(id="error-log", highlight=False, markup=True, wrap=True,
-                          auto_scroll=True, max_lines=20)
+            yield RichLog(
+                id="error-log",
+                highlight=False,
+                markup=True,
+                wrap=True,
+                auto_scroll=True,
+                max_lines=20,
+            )
 
         # Input area
         with Vertical(id="input-area"):
@@ -1298,10 +1414,14 @@ class Go2App(App):
 
     def on_mount(self) -> None:
         _err_capture._app = self  # wire up error capture to this app instance
-        self.log_chat("[bold cyan]Go2 CLI[/bold cyan] ready. "
-                      f"Model: [yellow]{self.model}[/yellow]  "
-                      f"Ollama: [dim]{self.ollama_url}[/dim]")
-        self.log_chat("[dim]Type commands below. The robot awaits your instructions.[/dim]")
+        self.log_chat(
+            "[bold cyan]Go2 CLI[/bold cyan] ready. "
+            f"Model: [yellow]{self.model}[/yellow]  "
+            f"Ollama: [dim]{self.ollama_url}[/dim]"
+        )
+        self.log_chat(
+            "[dim]Type commands below. The robot awaits your instructions.[/dim]"
+        )
         self.query_one("#user-input", Input).focus()
         # Start camera update loop
         self.set_interval(1.0, self._refresh_camera)
@@ -1314,7 +1434,11 @@ class Go2App(App):
         if _IMAGE_PROTOCOL is None:
             _IMAGE_PROTOCOL = _detect_image_protocol()
 
-        if _IMAGE_PROTOCOL != "halfblock" and _latest_frame_jpg is not None and _latest_frame_ts > 0:
+        if (
+            _IMAGE_PROTOCOL != "halfblock"
+            and _latest_frame_jpg is not None
+            and _latest_frame_ts > 0
+        ):
             # Use the InlineCameraWidget approach — emit to the widget's region
             cam = self.query_one("#camera-view", InlineCameraWidget)
             cam.refresh()
@@ -1336,8 +1460,6 @@ class Go2App(App):
             log.write(message)
         self._stream_line_written = False  # new non-stream line resets stream state
 
-
-
     def push_error(self, msg: str) -> None:
         """Receive an error string and show it in the error panel."""
         panel = self.query_one("#error-panel")
@@ -1346,7 +1468,9 @@ class Go2App(App):
         # Show only the most relevant line (last non-empty line of traceback)
         lines = [l for l in msg.splitlines() if l.strip()]
         display = lines[-1] if lines else msg
-        log.write(Text.from_markup(f"[bold red]ERR[/bold red] [dim]{escape(display)}[/dim]"))
+        log.write(
+            Text.from_markup(f"[bold red]ERR[/bold red] [dim]{escape(display)}[/dim]")
+        )
 
     def action_toggle_errors(self) -> None:
         """Ctrl+E — toggle error panel visibility."""
@@ -1372,7 +1496,9 @@ class Go2App(App):
 
     def action_show_state(self) -> None:
         state = _state_summary()
-        self.log_chat(f"[bold]Robot State:[/bold] {escape(json.dumps(state, indent=2))}")
+        self.log_chat(
+            f"[bold]Robot State:[/bold] {escape(json.dumps(state, indent=2))}"
+        )
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         user_input = event.value.strip()
@@ -1383,7 +1509,9 @@ class Go2App(App):
         inp.value = ""
 
         if self._processing:
-            self.log_chat("[yellow]⏳ Still processing previous command, please wait...[/yellow]")
+            self.log_chat(
+                "[yellow]⏳ Still processing previous command, please wait...[/yellow]"
+            )
             return
 
         # Handle built-in commands
@@ -1425,6 +1553,7 @@ class Go2App(App):
         # drive from a thread as long as robot tool calls are dispatched via
         # run_coroutine_threadsafe back to the main loop.
         import concurrent.futures as _cf
+
         future = _asyncio.run_coroutine_threadsafe(
             process_turn(
                 user_input=user_input,
@@ -1445,16 +1574,26 @@ class Go2App(App):
                     f"[bold magenta]Go2:[/bold magenta] {escape(response)}",
                 )
             else:
-                self.call_from_thread(self.log_chat, "[dim]Go2: (no text response)[/dim]")
+                self.call_from_thread(
+                    self.log_chat, "[dim]Go2: (no text response)[/dim]"
+                )
         except ConnectionError as e:
-            self.call_from_thread(self.log_chat, f"[bold red]ERROR:[/bold red] {escape(str(e))}")
-            self.call_from_thread(self.log_chat, "[dim]Is Ollama running? Try: ollama serve[/dim]")
+            self.call_from_thread(
+                self.log_chat, f"[bold red]ERROR:[/bold red] {escape(str(e))}"
+            )
+            self.call_from_thread(
+                self.log_chat, "[dim]Is Ollama running? Try: ollama serve[/dim]"
+            )
             if self.history and self.history[-1].get("role") == "user":
                 self.history.pop()
         except TimeoutError as e:
-            self.call_from_thread(self.log_chat, f"[bold red]TIMEOUT:[/bold red] {escape(str(e))}")
+            self.call_from_thread(
+                self.log_chat, f"[bold red]TIMEOUT:[/bold red] {escape(str(e))}"
+            )
         except Exception as e:
-            self.call_from_thread(self.log_chat, f"[bold red]ERROR:[/bold red] {escape(str(e))}")
+            self.call_from_thread(
+                self.log_chat, f"[bold red]ERROR:[/bold red] {escape(str(e))}"
+            )
         finally:
             self.call_from_thread(self._set_processing, False)
 
@@ -1476,6 +1615,7 @@ class Go2App(App):
 # ---------------------------------------------------------------------------
 # Connect
 # ---------------------------------------------------------------------------
+
 
 async def connect(args: argparse.Namespace) -> None:
     global _conn
@@ -1520,6 +1660,7 @@ async def connect(args: argparse.Namespace) -> None:
 # Entry point
 # ---------------------------------------------------------------------------
 
+
 async def main() -> None:
     p = argparse.ArgumentParser(
         description="Go2 natural language TUI",
@@ -1527,11 +1668,11 @@ async def main() -> None:
         epilog="""
 Examples:
   python go2_cli.py
-  python go2_cli.py --ip 10.0.0.207 --model llava
+  python go2_cli.py --ip 10.0.0.200 --model llava
   python go2_cli.py --no-camera --model mistral
         """,
     )
-    p.add_argument("--ip", default="10.0.0.207")
+    p.add_argument("--ip", default="10.0.0.200")
     p.add_argument("--serial", default=None)
     p.add_argument("--remote", action="store_true")
     p.add_argument("--username", default=None)

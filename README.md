@@ -20,11 +20,11 @@ pip install "git+https://github.com/12-hak/unitree_webrtc_connect.git@patch-1"
 
 # Option 1: MCP Server (for OpenWebUI / Claude Desktop)
 pip install "mcp[cli]" uvicorn starlette opencv-python-headless numpy
-python go2_mcp_server.py --ip 10.0.0.207 --port 8000
+python go2_mcp_server.py --ip 10.0.0.200 --port 8000
 
 # Option 2: Natural Language TUI (for direct control)
 pip install opencv-python-headless numpy requests pillow textual rich
-python cli.py --ip 10.0.0.207 --model qwen3.5:35b
+python cli.py --ip 10.0.0.200 --model qwen3.5:35b
 ```
 
 ---
@@ -37,7 +37,7 @@ A full-featured MCP server exposing 50+ tools for robot control via HTTP (Stream
 
 **Run (HTTP mode — for OpenWebUI):**
 ```bash
-python go2_mcp_server.py --ip 10.0.0.207 --port 8000
+python go2_mcp_server.py --ip 10.0.0.200 --port 8000
 ```
 Then configure OpenWebUI: **Admin Panel → Settings → Tools → Add Connection → MCP (Streamable HTTP) → URL: `http://<your-ip>:8000/mcp`**
 
@@ -68,7 +68,7 @@ python go2_mcp_server.py --stdio
 A full-screen terminal UI for conversational robot control with embedded camera feed.
 
 ```bash
-python cli.py --ip 10.0.0.207 --model qwen3.5:35b
+python cli.py --ip 10.0.0.200 --model qwen3.5:35b
 python cli.py --no-camera  # for headless operation
 ```
 
@@ -104,7 +104,7 @@ python cli.py --no-camera  # for headless operation
 | Mode | How to Connect | Command Flag |
 |------|----------------|--------------|
 | **Local AP** (default) | Robot's built-in Wi-Fi | `python script.py` |
-| **Local STA** | Connect to robot as station | `--ip 10.0.0.207` or `--serial <SN>` |
+| **Local STA** | Connect to robot as station | `--ip 10.0.0.200` or `--serial <SN>` |
 | **Remote** | Via Unitree cloud | `--remote --serial <SN> --username <user> --password <pass>` |
 | **MCF** (firmware 1.1.7+) | Unified mode — all commands work directly | Automatic |
 

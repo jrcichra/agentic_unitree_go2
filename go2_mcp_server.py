@@ -8,7 +8,7 @@ Install deps:
 
 Run (HTTP — OpenWebUI):
     python go2_mcp_server.py
-    python go2_mcp_server.py --ip 10.0.0.207 --port 8000
+    python go2_mcp_server.py --ip 10.0.0.200 --port 8000
 
 Run (stdio — Claude Desktop):
     python go2_mcp_server.py --stdio
@@ -1282,7 +1282,7 @@ async def run_stdio(args: argparse.Namespace) -> None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Unitree Go2 WebRTC MCP Server")
-    p.add_argument("--ip", default="10.0.0.207", help="Robot IP (default: 10.0.0.207)")
+    p.add_argument("--ip", default="10.0.0.200", help="Robot IP (default: 10.0.0.200)")
     p.add_argument("--serial", help="Robot serial number")
     p.add_argument("--remote", action="store_true")
     p.add_argument("--username", help="Unitree account email (remote mode)")
