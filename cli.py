@@ -27,7 +27,16 @@ import json
 import sys
 import time
 
+import warnings
+import os
+import sys
+
+os.environ["TERM_IMAGE_LOG_LEVEL"] = "error"
+
+warnings.filterwarnings("ignore", category=UserWarning, module="term_image")
+
 import requests
+from PIL import Image
 
 try:
     import cv2
@@ -40,6 +49,16 @@ except ImportError:
     _CV2 = False
     print("WARNING: opencv-python-headless not installed — camera disabled.")
     print("         pip install opencv-python-headless numpy\n")
+
+try:
+    from term_image.image import AutoImage
+
+    _TERM_IMAGE = True
+except ImportError:
+    AutoImage = None  # type: ignore
+    _TERM_IMAGE = False
+    print("WARNING: term-image not installed — image display disabled.")
+    print("         pip install term-image\n")
 
 from unitree_webrtc_connect.webrtc_driver import (
     UnitreeWebRTCConnection,
@@ -189,6 +208,28 @@ def _get_frame_b64(quality: int = 75) -> str | None:
         return None
     ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, quality])
     return base64.b64encode(buf.tobytes()).decode("ascii") if ok else None
+
+
+def _display_frame() -> bool:
+    """Display the current camera frame in the terminal. Returns True if displayed."""
+    if not _TERM_IMAGE or not _CV2 or _latest_frame_jpg is None:
+        return False
+    if time.time() - _latest_frame_ts > 5.0:
+        return False
+    if not sys.stdout.isatty():
+        return False
+    try:
+        img = cv2.imdecode(np.frombuffer(_latest_frame_jpg, np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            return False
+        # Convert BGR to RGB
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(img_rgb)
+        image = AutoImage(pil_img, width=80)
+        print(image)
+        return True
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -383,6 +424,23 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "capture_image",
+            "description": "Capture and return the current camera view. Use this when the user wants to see what the robot sees.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "quality": {
+                        "type": "integer",
+                        "description": "JPEG quality 1-100",
+                        "default": 75,
+                    },
+                },
+            },
+        },
+    },
 ]
 
 TOOL_NAMES = {t["function"]["name"] for t in TOOLS}
@@ -405,7 +463,7 @@ async def run_tool(name: str, args: dict) -> str:
 
     elif name == "turn":
         deg = float(args.get("degrees", 0))
-        rad = max(-1.2, min(1.2, deg * 3.14159 / 180.0))
+        rad = deg * 3.14159 / 180.0
         r = await _mcf("Move", {"x": 0, "y": 0, "z": rad})
         return f"turn({deg:.1f}°) → {'ok' if r['ok'] else 'error'}"
 
@@ -472,6 +530,27 @@ async def run_tool(name: str, args: dict) -> str:
         level = int(args.get("level", 1))
         r = await _mcf("SpeedLevel", {"data": level})
         return f"set_speed({level}) → {'ok' if r['ok'] else 'error'}"
+
+    elif name == "capture_image":
+        quality = int(args.get("quality", 75))
+        if not _CV2 or _latest_frame_jpg is None:
+            return "no camera feed available"
+        if time.time() - _latest_frame_ts > 5.0:
+            return "camera feed stale"
+        try:
+            img = cv2.imdecode(
+                np.frombuffer(_latest_frame_jpg, np.uint8), cv2.IMREAD_COLOR
+            )
+            if img is None:
+                return "failed to decode frame"
+            # Convert BGR to RGB
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(img_rgb)
+            image = AutoImage(pil_img, width=80)
+            print(image)
+            return "image captured and displayed"
+        except Exception as e:
+            return f"error displaying image: {e}"
 
     else:
         return f"unknown tool: {name}"
@@ -710,6 +789,13 @@ async def repl(args: argparse.Namespace) -> None:
         # Built-in commands that bypass the LLM
         if user_input.lower() == "state":
             print(json.dumps(_state_summary(), indent=2))
+            continue
+
+        if user_input.lower() in ("camera", "vision", "see"):
+            if _display_frame():
+                print()
+            else:
+                print("[no camera feed available]")
             continue
 
         if user_input.lower() == "clear":

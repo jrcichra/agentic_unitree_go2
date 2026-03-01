@@ -8,3 +8,4 @@ numpy
 pillow
 fastapi
 httpx
+term-image
