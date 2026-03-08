@@ -1219,30 +1219,27 @@ class InlineCameraWidget(Static):
             return
         try:
             seq = _emit_inline_image(_latest_frame_jpg, width_px=500)
-            if seq:
-                # Get widget position to move cursor there first
-                region = self.content_region
-                # Move cursor to widget top-left and emit
-                tty_escape = (
-                    "\x1b["
-                    + str(region.y + 1)
-                    + ";"
-                    + str(region.x + 1)
-                    + "H"  # cursor position
-                    + seq
-                )
-                # Write to the actual tty fd
-                # On WSL, /dev/tty works. On Windows native, use conout$.
-                tty_path = "/dev/tty"
-                if not os.path.exists(tty_path):
-                    tty_path = "CONOUT$"
-                try:
-                    with open(tty_path, "wb") as tty:
-                        tty.write(tty_escape.encode())
-                except Exception:
-                    # Last resort: write to stdout directly
-                    sys.stdout.buffer.write(tty_escape.encode())
-                    sys.stdout.buffer.flush()
+            if not seq:
+                return
+            region = self.content_region
+            tty_escape = (
+                "\x1b["
+                + str(region.y + 1)
+                + ";"
+                + str(region.x + 1)
+                + "H"  # cursor position
+                + seq
+            )
+            encoded = tty_escape.encode()
+            # os.write(1) writes directly to fd 1, bypassing Python buffering
+            # and Textual's stream wrapping — the only reliable method in WSL
+            # where /dev/tty is locked by Textual and silently fails.
+            try:
+                os.write(1, encoded)
+            except OSError:
+                # Fall back to /dev/tty on non-WSL systems
+                with open("/dev/tty", "wb") as tty:
+                    tty.write(encoded)
         except Exception:
             pass  # silently degrade to halfblock
 
