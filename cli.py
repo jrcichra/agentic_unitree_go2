@@ -24,6 +24,7 @@ import json
 import sys
 import time
 import threading
+import traceback
 import warnings
 import logging
 import os
@@ -229,8 +230,9 @@ async def _frame_loop(track) -> None:
                 continue
             ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
             if ok:
+                jpg = buf.tobytes()  # copy before lock to minimise hold time
                 with _frame_lock:
-                    _latest_frame_jpg = buf.tobytes()
+                    _latest_frame_jpg = jpg
                     _latest_frame_ts = time.time()
                 consecutive_errors = 0
         except asyncio.TimeoutError:
@@ -269,7 +271,7 @@ def _get_frame_b64(quality: int = 75) -> str | None:
         # 5s stale threshold — if feed has truly stopped, _frame_loop zeroes the ts
         if _latest_frame_ts > 0 and (time.time() - _latest_frame_ts) > 5.0:
             return None
-        frame_data = _latest_frame_jpg  # bytes is immutable, safe to ref outside lock
+        frame_data = _latest_frame_jpg
     try:
         img = cv2.imdecode(np.frombuffer(frame_data, np.uint8), cv2.IMREAD_COLOR)
         if img is None:
@@ -285,6 +287,14 @@ def _get_frame_b64(quality: int = 75) -> str | None:
 # Alacritty supports the iTerm2 inline image protocol.
 # We write the image escape directly to the real tty, bypassing Textual.
 # ---------------------------------------------------------------------------
+
+
+# Terminals that support the iTerm2 inline image protocol, identified by
+# their XTVERSION response (sent in response to \x1b[>q).
+_ITERM2_XTVERSION_NAMES = [
+    b"alacritty", b"wezterm", b"iterm", b"windows terminal",
+    b"vte", b"foot", b"mintty", b"rio",
+]
 
 
 def _detect_image_protocol_envvars() -> str:
@@ -330,7 +340,7 @@ def _probe_image_protocol() -> str:
         return _detect_image_protocol_envvars()
 
     def _drain(timeout: float = 0.2) -> bytes:
-        buf = b""
+        chunks: list[bytes] = []
         deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
@@ -342,53 +352,36 @@ def _probe_image_protocol() -> str:
             chunk = os.read(fd, 512)
             if not chunk:
                 break
-            buf += chunk
-        return buf
+            chunks.append(chunk)
+        return b"".join(chunks)
 
-    result = "halfblock"
     try:
         _tty.setraw(fd, _termios.TCSANOW)
 
-        # --- 1. Kitty graphics protocol probe ---
-        # a=q: query only (no display), i=31: image id, s=1,v=1: 1×1
+        # 1. Kitty graphics protocol — a=q: query only, no display
         os.write(sys.stdout.fileno(), b"\x1b_Ga=q,i=31,s=1,v=1,m=0;\x1b\\")
-        resp = _drain(0.25)
-        if b"\x1b_G" in resp:
-            result = "kitty"
-            return result
+        if b"\x1b_G" in _drain(0.25):
+            return "kitty"
 
-        # --- 2. XTVERSION query (DCS > | … ST) ---
-        # Modern terminals respond with their name; we match known iTerm2-
-        # compatible ones.  Alacritty, WezTerm, and Windows Terminal all reply.
+        # 2. XTVERSION — Alacritty, WezTerm, Windows Terminal all respond with name
         os.write(sys.stdout.fileno(), b"\x1b[>q")
-        resp = _drain(0.35)
-        resp_lower = resp.lower()
-        iterm2_names = [
-            b"alacritty", b"wezterm", b"iterm", b"windows terminal",
-            b"vte", b"foot", b"mintty", b"rio",
-        ]
-        if any(name in resp_lower for name in iterm2_names):
-            result = "iterm2"
-            return result
+        resp_lower = _drain(0.35).lower()
+        if any(name in resp_lower for name in _ITERM2_XTVERSION_NAMES):
+            return "iterm2"
 
-        # --- 3. iTerm2 ReportCellSize probe ---
+        # 3. iTerm2 ReportCellSize — iTerm2 itself responds; most others don't
         os.write(sys.stdout.fileno(), b"\x1b]1337;ReportCellSize\x07")
         resp = _drain(0.3)
         if b"1337" in resp or b"ReportCellSize" in resp:
-            result = "iterm2"
-            return result
+            return "iterm2"
 
-        # --- 4. env-var fallback ---
-        result = _detect_image_protocol_envvars()
-        return result
+        return _detect_image_protocol_envvars()
 
     except Exception:
-        result = _detect_image_protocol_envvars()
-        return result
+        return _detect_image_protocol_envvars()
     finally:
-        # Flush any unread response bytes so they don't appear as stray input
         try:
-            _drain(0.05)
+            _drain(0.05)  # flush stray response bytes before restoring mode
         except Exception:
             pass
         try:
@@ -469,16 +462,13 @@ def _frame_to_rich_text(max_w: int = 76, max_h: int = 40) -> "Text":
         if img is None:
             return Text("no frame")
         target_w = max_w
-        # Ensure target_h is even so we never go out of bounds on row+1
-        target_h = (max_h * 2) & ~1
+        target_h = (max_h * 2) & ~1  # keep even so row+1 is always valid
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         resized = cv2.resize(
             img_rgb, (target_w, target_h), interpolation=cv2.INTER_AREA
         )
         t = Text(overflow="fold", no_wrap=True)
         for row in range(0, target_h, 2):
-            if row + 1 >= target_h:
-                break
             for col in range(target_w):
                 r1, g1, b1 = (
                     int(resized[row, col, 0]),
@@ -1297,7 +1287,6 @@ class InlineCameraWidget(Static):
         self._consecutive_failures: int = 0
 
     def on_mount(self) -> None:
-        # _IMAGE_PROTOCOL is set in main() before TUI starts; safe to read here.
         self._use_inline = _IMAGE_PROTOCOL in ("iterm2", "kitty")
 
     def render(self):
@@ -1313,9 +1302,10 @@ class InlineCameraWidget(Static):
         """After each render cycle, emit inline image if protocol supports it."""
         if self._use_inline and not _IMAGE_PROTOCOL_FAILED:
             with _frame_lock:
-                has_frame = _latest_frame_jpg is not None and _latest_frame_ts > 0
-                frame_data = _latest_frame_jpg if has_frame else None
-            if has_frame and frame_data:
+                ts = _latest_frame_ts
+                frame_data = _latest_frame_jpg if ts > 0 else None
+            if frame_data and ts != self._last_emit_ts:
+                self._last_emit_ts = ts
                 self._emit_to_tty(frame_data)
 
     def _emit_to_tty(self, jpg_bytes: bytes) -> None:
@@ -1345,12 +1335,11 @@ class InlineCameraWidget(Static):
                 with open("/dev/tty", "wb") as tty:
                     tty.write(encoded)
             self._consecutive_failures = 0
-        except Exception as e:
+        except Exception:
             self._consecutive_failures += 1
             if self._consecutive_failures >= 3:
                 _IMAGE_PROTOCOL_FAILED = True
-                import traceback
-                traceback.print_exc()  # goes to error panel
+                traceback.print_exc()
 
 
 HELP_TEXT = """
