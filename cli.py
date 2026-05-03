@@ -770,6 +770,20 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "set_volume",
+            "description": "Set the robot's speaker volume (0=silent, 10=max).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "level": {"type": "integer", "description": "Volume 0–10"},
+                },
+                "required": ["level"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "play_radio",
             "description": "Stream internet radio or any HTTP audio URL through the robot's speaker. Default station: https://nashe1.hostingradio.ru:80/ultra-128.mp3",
             "parameters": {
@@ -949,6 +963,16 @@ async def run_tool(name: str, args: dict) -> str:
         level = int(args.get("level", 1))
         r = await _mcf("SpeedLevel", {"data": level})
         return f"set_speed({level}) → {'ok' if r['ok'] else 'error'}"
+
+    elif name == "set_volume":
+        level = max(0, min(10, int(args.get("level", 5))))
+        if _conn is None or _conn.datachannel is None:
+            return "error: no connection"
+        resp = await _conn.datachannel.pub_sub.publish_request_new(
+            RTC_TOPIC["VUI"], {"api_id": 1003, "parameter": {"volume": level}}
+        )
+        ok = _code(resp) == 0
+        return f"volume({level}) → {'ok' if ok else 'error'}"
 
     elif name == "play_radio":
         url = args.get("url", "")
