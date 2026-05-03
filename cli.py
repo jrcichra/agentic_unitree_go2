@@ -710,24 +710,25 @@ async def _velocity_loop(vx: float, vy: float, vyaw: float, duration_s: float) -
     Stops early if LiDAR detects a forward obstacle within OBSTACLE_STOP_M.
     Only checks obstacle distance for forward motion (vx > 0).
     """
-    ticks = max(1, int(duration_s * MOVE_TICK_HZ))
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + duration_s
     ok = True
-    stopped_early = False
-    for _ in range(ticks):
+    while loop.time() < deadline:
         # Obstacle guard: only for forward motion
         if vx > 0:
             dist = _forward_obstacle_m()
             if 0 < dist < OBSTACLE_STOP_M:
-                stopped_early = True
-                break
+                await _mcf("Move", {"x": 0, "y": 0, "z": 0})
+                return "obstacle"
         r = await _mcf("Move", {"x": vx, "y": vy, "z": vyaw})
         if not r.get("ok", False):
             ok = False
-        await asyncio.sleep(MOVE_TICK_S)
+        # Sleep only as long as needed — don't overshoot the deadline
+        remaining = deadline - loop.time()
+        if remaining > 0:
+            await asyncio.sleep(min(MOVE_TICK_S, remaining))
     # Send stop
     await _mcf("Move", {"x": 0, "y": 0, "z": 0})
-    if stopped_early:
-        return "obstacle"  # caller can check for this
     return ok
 
 
