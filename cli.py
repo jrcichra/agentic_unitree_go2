@@ -10,9 +10,9 @@ Install:
     uv sync
 
 Run:
-    uv run cli.py
+    uv run cli.py --ip 10.0.0.200
     uv run cli.py --ip 10.0.0.200 --model llava
-    uv run cli.py --no-camera
+    uv run cli.py --ip 10.0.0.200 --no-camera
 """
 
 import asyncio
@@ -1747,17 +1747,17 @@ async def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python go2_cli.py
-  python go2_cli.py --ip 10.0.0.200 --model llava
-  python go2_cli.py --no-camera --model mistral
+  uv run cli.py --ip 10.0.0.200
+  uv run cli.py --ip 10.0.0.200 --model llava
+  uv run cli.py --ip 10.0.0.200 --no-camera
         """,
     )
-    p.add_argument("--ip", default="10.0.0.200")
+    p.add_argument("--ip", required=True)
     p.add_argument("--serial", default=None)
     p.add_argument("--remote", action="store_true")
     p.add_argument("--username", default=None)
     p.add_argument("--password", default=None)
-    p.add_argument("--model", default="qwen3.5:35b")
+    p.add_argument("--model", default="qwen3.6:27b")
     p.add_argument("--ollama", default="http://localhost:11434")
     p.add_argument("--no-camera", action="store_true")
     p.add_argument("--quality", default=75, type=int, help="JPEG quality 1-100")
