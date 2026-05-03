@@ -771,11 +771,11 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "play_radio",
-            "description": "Stream internet radio or any HTTP audio URL through the robot's speaker.",
+            "description": "Stream internet radio or any HTTP audio URL through the robot's speaker. Default station: https://nashe1.hostingradio.ru:80/ultra-128.mp3",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "url": {"type": "string", "description": "HTTP audio stream URL (MP3/AAC)"},
+                    "url": {"type": "string", "description": "HTTP audio stream URL (MP3/AAC). Defaults to https://nashe1.hostingradio.ru:80/ultra-128.mp3"},
                 },
                 "required": ["url"],
             },
@@ -1746,8 +1746,12 @@ class Go2App(App):
             self.model = user_input.split(None, 1)[1].strip()
             self.log_chat(f"[dim]Model switched to: {self.model}[/dim]")
             return
+        _DEFAULT_RADIO = "https://nashe1.hostingradio.ru:80/ultra-128.mp3"
         if user_input.lower() == "radio stop":
             self._run_stop_radio()
+            return
+        if user_input.lower() == "radio":
+            self._run_start_radio(_DEFAULT_RADIO)
             return
         if user_input.lower().startswith("radio "):
             url = user_input.split(None, 1)[1].strip()
