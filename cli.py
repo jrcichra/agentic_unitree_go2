@@ -775,10 +775,11 @@ async def run_tool(name: str, args: dict) -> str:
     elif name == "turn":
         deg = float(args.get("degrees", 0))
         rad = abs(deg) * 3.14159 / 180.0
-        YAW_RATE = 0.8  # rad/s — comfortable turn speed
-        duration = rad / YAW_RATE
+        YAW_RATE_CMD = 0.8   # rad/s sent to robot
+        YAW_RATE_ACTUAL = 0.6  # empirical actual rotation rate at that command
+        duration = rad / YAW_RATE_ACTUAL
         sign = 1.0 if deg > 0 else -1.0
-        ok = await _velocity_loop(0, 0, YAW_RATE * sign, duration)
+        ok = await _velocity_loop(0, 0, YAW_RATE_CMD * sign, duration)
         status = "ok" if ok else "error"
         return f"turn({deg:.1f}°, {duration:.1f}s) → {status}"
 
