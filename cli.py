@@ -163,6 +163,10 @@ _sport_state: dict = {}
 _low_state: dict = {}
 _main_loop: "asyncio.AbstractEventLoop | None" = None
 
+# ── Context tracking ─────────────────────────────────────────────────────────
+_last_prompt_tokens: int = 0
+_context_size: int = 0
+
 # ── Radio / audio playback ────────────────────────────────────────────────────
 _radio_player = None   # aiortc MediaPlayer instance
 
@@ -1016,6 +1020,20 @@ async def run_tool(name: str, args: dict) -> str:
 MAX_HISTORY_TURNS = 20  # keep last N user/assistant pairs to prevent context overflow
 
 
+def _fetch_context_size(model: str, ollama_url: str) -> int:
+    """Query Ollama for the model's context window size."""
+    try:
+        r = requests.post(f"{ollama_url}/api/show", json={"model": model}, timeout=5)
+        r.raise_for_status()
+        info = r.json().get("model_info", {})
+        for key, val in info.items():
+            if "context" in key.lower():
+                return int(val)
+    except Exception:
+        pass
+    return 0
+
+
 def _ollama_chat(
     messages: list[dict],
     model: str,
@@ -1064,6 +1082,7 @@ def _ollama_chat(
     content_parts = []
     thinking_parts = []
     tool_calls = []
+    prompt_eval_count = 0
 
     for line in resp.iter_lines():
         if not line:
@@ -1091,6 +1110,14 @@ def _ollama_chat(
         # Ollama delivers tool_calls as a complete list in one chunk (not streamed)
         if msg.get("tool_calls"):
             tool_calls = msg["tool_calls"]
+
+        # Final done chunk carries token counts
+        if data.get("done"):
+            prompt_eval_count = data.get("prompt_eval_count", 0)
+
+    global _last_prompt_tokens
+    if prompt_eval_count:
+        _last_prompt_tokens = prompt_eval_count
 
     return {
         "role": "assistant",
@@ -1317,6 +1344,13 @@ Screen {
     width: 1fr;
     content-align: left middle;
     padding: 0 1;
+}
+
+#context-label {
+    width: 12;
+    content-align: right middle;
+    padding: 0 1;
+    color: $text-muted;
 }
 
 #battery-label {
@@ -1652,6 +1686,7 @@ class Go2App(App):
         with Horizontal(id="top-bar"):
             yield Label("● Go2 Connected", id="status-label")
             yield Label("🔋 ?%", id="battery-label")
+            yield Label("ctx: ?%", id="context-label")
 
         # Main area
         with Horizontal(id="main-area"):
@@ -1704,6 +1739,9 @@ class Go2App(App):
         self.set_interval(1.0, self._refresh_camera)
         # Start battery/state update loop
         self.set_interval(5.0, self._refresh_status)
+        # Start context tracking
+        self._refresh_context()
+        self.set_interval(2.0, self._refresh_context)
 
     def _refresh_camera(self) -> None:
         """Render camera using inline image protocol if available, else halfblock."""
@@ -1715,6 +1753,15 @@ class Go2App(App):
         batt = state.get("battery_pct", "?")
         label = self.query_one("#battery-label", Label)
         label.update(f"🔋 {batt}%")
+
+    def _refresh_context(self) -> None:
+        global _context_size
+        if _context_size == 0:
+            _context_size = _fetch_context_size(self.model, self.ollama_url)
+        if _context_size > 0 and _last_prompt_tokens > 0:
+            pct = int((_last_prompt_tokens / _context_size) * 100)
+            label = self.query_one("#context-label", Label)
+            label.update(f"ctx: {pct}%")
 
     def log_chat(self, message: str, markup: bool = True) -> None:
         log = self.query_one("#chat-log", RichLog)
