@@ -1508,11 +1508,10 @@ LOOK / CAMERA
 ROBOT STATE  (F1 or type 'state')
   Shows position, velocity, battery %, rpy, gait type, LiDAR distances
 
-RADIO / AUDIO
-  "play some jazz radio"          play_radio(<url>)
-  "stop the music"                stop_audio()
-  radio <url>                     stream audio to robot speaker directly
-  radio stop                      stop playback
+RADIO / AUDIO  (just tell the model naturally)
+  "play the radio"                plays default station
+  "play <url>"                    streams any HTTP audio URL
+  "stop the music"                stops playback
 
 VOICE INPUT
   Ctrl+M                          toggle mic recording on/off
@@ -1532,8 +1531,6 @@ BUILT-IN TEXT COMMANDS
   state          Print robot state
   clear          Clear conversation
   model <name>   Switch Ollama model (e.g. model llava)
-  radio <url>    Stream audio to robot speaker
-  radio stop     Stop audio playback
 """
 
 from textual.screen import ModalScreen
@@ -1746,18 +1743,6 @@ class Go2App(App):
             self.model = user_input.split(None, 1)[1].strip()
             self.log_chat(f"[dim]Model switched to: {self.model}[/dim]")
             return
-        _DEFAULT_RADIO = "https://nashe1.hostingradio.ru:80/ultra-128.mp3"
-        if user_input.lower() == "radio stop":
-            self._run_stop_radio()
-            return
-        if user_input.lower() == "radio":
-            self._run_start_radio(_DEFAULT_RADIO)
-            return
-        if user_input.lower().startswith("radio "):
-            url = user_input.split(None, 1)[1].strip()
-            self._run_start_radio(url)
-            return
-
         self.log_chat(f"[bold green]You:[/bold green] {escape(user_input)}")
         self._run_turn(user_input)
 
@@ -1828,21 +1813,6 @@ class Go2App(App):
             )
         finally:
             self.call_from_thread(self._set_processing, False)
-
-    # ── Radio ────────────────────────────────────────────────────────────────
-
-    @work(exclusive=False, thread=True)
-    def _run_start_radio(self, url: str) -> None:
-        self.call_from_thread(self.log_chat, f"[dim]📻 Starting radio: {url}[/dim]")
-        future = asyncio.run_coroutine_threadsafe(_start_radio(url), _main_loop)
-        result = future.result(timeout=15)
-        self.call_from_thread(self.log_chat, f"[dim]{result}[/dim]")
-
-    @work(exclusive=False, thread=True)
-    def _run_stop_radio(self) -> None:
-        future = asyncio.run_coroutine_threadsafe(_stop_radio(), _main_loop)
-        result = future.result(timeout=5)
-        self.call_from_thread(self.log_chat, f"[dim]{result}[/dim]")
 
     # ── Mic / voice input ────────────────────────────────────────────────────
 
