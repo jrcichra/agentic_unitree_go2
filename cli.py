@@ -1293,7 +1293,7 @@ async def process_turn(
 # System prompt
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """Your name is Benben. You are controlling a Unitree Go2 robot dog via tool calls.
+SYSTEM_PROMPT = """Your name is BenBen. You are controlling a Unitree Go2 robot dog via tool calls.
 The user gives natural language instructions. Execute them decisively and efficiently.
 
 HOW THE LOOP WORKS — this is critical to understand:
