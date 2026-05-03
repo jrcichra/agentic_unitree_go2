@@ -1761,7 +1761,7 @@ class Go2App(App):
         if _context_size > 0 and _last_prompt_tokens > 0:
             pct = int((_last_prompt_tokens / _context_size) * 100)
             label = self.query_one("#context-label", Label)
-            label.update(f"ctx: {pct}%")
+            label.update(f"ctx: {_last_prompt_tokens}/{_context_size} ({pct}%)")
 
     def log_chat(self, message: str, markup: bool = True) -> None:
         log = self.query_one("#chat-log", RichLog)
