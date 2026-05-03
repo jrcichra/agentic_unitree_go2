@@ -1758,10 +1758,14 @@ class Go2App(App):
         global _context_size
         if _context_size == 0:
             _context_size = _fetch_context_size(self.model, self.ollama_url)
-        if _context_size > 0 and _last_prompt_tokens > 0:
-            pct = int((_last_prompt_tokens / _context_size) * 100)
-            label = self.query_one("#context-label", Label)
-            label.update(f"ctx: {_last_prompt_tokens}/{_context_size} ({pct}%)")
+        if _context_size > 0:
+            if _last_prompt_tokens > 0:
+                pct = int((_last_prompt_tokens / _context_size) * 100)
+                label = self.query_one("#context-label", Label)
+                label.update(f"ctx: {_last_prompt_tokens}/{_context_size} ({pct}%)")
+            else:
+                label = self.query_one("#context-label", Label)
+                label.update(f"ctx: 0/{_context_size} (0%)")
 
     def log_chat(self, message: str, markup: bool = True) -> None:
         log = self.query_one("#chat-log", RichLog)
