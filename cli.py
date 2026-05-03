@@ -1017,7 +1017,10 @@ async def process_turn(
         log(f"Thinking... (step {iteration + 1})")
 
         try:
-            assistant_msg = _ollama_chat(trimmed, model, ollama_url)
+            loop = asyncio.get_event_loop()
+            assistant_msg = await loop.run_in_executor(
+                None, lambda: _ollama_chat(trimmed, model, ollama_url)
+            )
         except (ConnectionError, TimeoutError) as e:
             history.pop()  # remove user msg so we don't corrupt history
             raise
@@ -1462,6 +1465,8 @@ class Go2App(App):
         self.history: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
         self._processing = False
         self._camera_task = None
+        self._think_timer = None
+        self._think_idx = 0
 
     def compose(self) -> ComposeResult:
         # Top status bar
@@ -1677,10 +1682,22 @@ class Go2App(App):
         finally:
             self.call_from_thread(self._set_processing, False)
 
+    _THINK_FRAMES = ["⏳ Thinking", "⏳ Thinking.", "⏳ Thinking..", "⏳ Thinking..."]
+
     def _set_processing(self, value: bool) -> None:
         self._processing = value
-        status_lbl = self.query_one("#status-label", Label)
-        status_lbl.update("⏳ Processing..." if value else "● Go2 Connected")
+        if value:
+            self._think_idx = 0
+            self._think_timer = self.set_interval(0.4, self._tick_thinking)
+        else:
+            if self._think_timer is not None:
+                self._think_timer.stop()
+                self._think_timer = None
+            self.query_one("#status-label", Label).update("● Go2 Connected")
+
+    def _tick_thinking(self) -> None:
+        self._think_idx = (self._think_idx + 1) % len(self._THINK_FRAMES)
+        self.query_one("#status-label", Label).update(self._THINK_FRAMES[self._think_idx])
 
     async def action_quit(self) -> None:
         self.log_chat("[dim]Stopping robot...[/dim]")
