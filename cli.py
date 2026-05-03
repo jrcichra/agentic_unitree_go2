@@ -568,7 +568,13 @@ async def _start_radio(url: str) -> str:
         return "error: not connected"
     await _stop_radio()
     try:
-        _radio_player = MediaPlayer(url)
+        options = {
+            "reconnect": "1",
+            "reconnect_on_network_error": "1",
+            "reconnect_on_http_error": "1",
+            "reconnect_delay_max": "5",
+        }
+        _radio_player = MediaPlayer(url, options=options)
         # Reuse the existing audio sender so no SDP renegotiation is needed
         senders = _conn.pc.getSenders()
         audio_sender = next((s for s in senders if s.track and s.track.kind == "audio"), None)
