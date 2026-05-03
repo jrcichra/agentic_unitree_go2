@@ -1592,6 +1592,7 @@ class Go2App(App):
 
         inp = self.query_one("#user-input", Input)
         inp.value = ""
+        inp.focus()
 
         if self._processing:
             self.log_chat(
@@ -1694,6 +1695,7 @@ class Go2App(App):
                 self._think_timer.stop()
                 self._think_timer = None
             self.query_one("#status-label", Label).update("● Go2 Connected")
+            self.query_one("#user-input", Input).focus()
 
     def _tick_thinking(self) -> None:
         self._think_idx = (self._think_idx + 1) % len(self._THINK_FRAMES)
