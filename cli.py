@@ -1468,6 +1468,7 @@ class Go2App(App):
         self._camera_task = None
         self._think_timer = None
         self._think_idx = 0
+        self._queue: list[str] = []
 
     def compose(self) -> ComposeResult:
         # Top status bar
@@ -1596,9 +1597,8 @@ class Go2App(App):
         inp.focus()
 
         if self._processing:
-            self.log_chat(
-                "[yellow]⏳ Still processing previous command, please wait...[/yellow]"
-            )
+            self._queue.append(user_input)
+            self.log_chat(f"[dim]⏳ Queued: {escape(user_input)}[/dim]")
             return
 
         # Handle built-in commands
@@ -1697,6 +1697,10 @@ class Go2App(App):
                 self._think_timer = None
             self.query_one("#status-label", Label).update("● Go2 Connected")
             self.query_one("#user-input", Input).focus()
+            if self._queue:
+                next_input = self._queue.pop(0)
+                self.log_chat(f"[bold green]You:[/bold green] {escape(next_input)}")
+                self._run_turn(next_input)
 
     def _tick_thinking(self) -> None:
         self._think_idx = (self._think_idx + 1) % len(self._THINK_FRAMES)
