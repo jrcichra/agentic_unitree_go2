@@ -19,16 +19,22 @@ Built on [unitree_webrtc_connect](https://github.com/legion1581/unitree_webrtc_c
 
 ## Quick Start
 
+Install dependencies:
 ```bash
-# Set up virtual environment and install deps
 uv sync
+```
 
-# Option 1: MCP Server (for OpenWebUI / Claude Desktop)
-uv run go2_mcp_server.py --ip 10.0.0.200 --port 8000
-
-# Option 2: Natural Language TUI (for direct control)
+**Option A — Natural Language TUI** (standalone, talks to robot + Ollama directly):
+```bash
 uv run cli.py --ip 10.0.0.200 --model qwen3.5:35b
 ```
+
+**Option B — MCP Server** (for OpenWebUI / Claude Desktop):
+```bash
+uv run go2_mcp_server.py --ip 10.0.0.200 --port 8000
+```
+
+Pick one. They are independent.
 
 ---
 

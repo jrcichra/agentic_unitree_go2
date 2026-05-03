@@ -7,14 +7,12 @@ A full-screen terminal UI where you type commands in plain English:
   - Bottom: input box (submit with Enter)
 
 Install:
-    python -m venv venv
-    source venv/bin/activate
-    pip install -r requirements.txt
+    uv sync
 
 Run:
-    python go2_cli.py
-    python go2_cli.py --ip 10.0.0.200 --model llava
-    python go2_cli.py --no-camera
+    uv run cli.py
+    uv run cli.py --ip 10.0.0.200 --model llava
+    uv run cli.py --no-camera
 """
 
 import asyncio
