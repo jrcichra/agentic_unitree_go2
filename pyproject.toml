@@ -14,6 +14,8 @@ dependencies = [
     "term-image",
     "textual",
     "unitree-webrtc-connect",
+    "sounddevice",
+    "faster-whisper",
 ]
 
 [tool.uv.sources]

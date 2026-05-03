@@ -96,6 +96,14 @@ except ImportError:
     np = None
     _CV2 = False
 
+# ── Optional: microphone capture for voice input ─────────────────────────────
+try:
+    import sounddevice as _sd
+    _HAS_SD = True
+except ImportError:
+    _sd = None
+    _HAS_SD = False
+
 # ---------------------------------------------------------------------------
 # TUI imports
 # ---------------------------------------------------------------------------
@@ -154,6 +162,13 @@ _frame_lock = threading.Lock()
 _sport_state: dict = {}
 _low_state: dict = {}
 _main_loop: "asyncio.AbstractEventLoop | None" = None
+
+# ── Radio / audio playback ────────────────────────────────────────────────────
+_radio_player = None   # aiortc MediaPlayer instance
+
+# ── Voice / Whisper ───────────────────────────────────────────────────────────
+_whisper_model = None
+_whisper_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Low-level helpers
@@ -535,6 +550,72 @@ def _forward_obstacle_m() -> float:
 
 
 # ---------------------------------------------------------------------------
+# Radio / audio helpers
+# ---------------------------------------------------------------------------
+
+
+async def _start_radio(url: str) -> str:
+    global _radio_player
+    try:
+        from aiortc.contrib.media import MediaPlayer
+    except ImportError:
+        return "error: aiortc MediaPlayer not available"
+    if _conn is None:
+        return "error: not connected"
+    await _stop_radio()
+    try:
+        _radio_player = MediaPlayer(url)
+        # Reuse the existing audio sender so no SDP renegotiation is needed
+        senders = _conn.pc.getSenders()
+        audio_sender = next((s for s in senders if s.track and s.track.kind == "audio"), None)
+        if audio_sender:
+            await audio_sender.replaceTrack(_radio_player.audio)
+        else:
+            _conn.pc.addTrack(_radio_player.audio)
+        return f"radio playing: {url}"
+    except Exception as e:
+        _radio_player = None
+        return f"radio error: {e}"
+
+
+async def _stop_radio() -> str:
+    global _radio_player
+    if _radio_player is None:
+        return "no audio playing"
+    try:
+        senders = _conn.pc.getSenders() if _conn else []
+        audio_sender = next((s for s in senders if s.track and s.track.kind == "audio"), None)
+        if audio_sender:
+            await audio_sender.replaceTrack(None)
+        _radio_player.audio.stop()
+    except Exception:
+        pass
+    _radio_player = None
+    return "audio stopped"
+
+
+# ---------------------------------------------------------------------------
+# Whisper / voice transcription
+# ---------------------------------------------------------------------------
+
+
+def _get_whisper_model(size: str = "base"):
+    global _whisper_model
+    with _whisper_lock:
+        if _whisper_model is None:
+            from faster_whisper import WhisperModel
+            _whisper_model = WhisperModel(size, device="cpu", compute_type="int8")
+        return _whisper_model
+
+
+def _transcribe_audio(audio_np, sample_rate: int = 16000) -> str:
+    """Transcribe a float32 numpy array with faster-whisper. Returns text."""
+    model = _get_whisper_model()
+    segments, _ = model.transcribe(audio_np, beam_size=5, language="en")
+    return " ".join(s.text for s in segments).strip()
+
+
+# ---------------------------------------------------------------------------
 # Tool definitions
 # ---------------------------------------------------------------------------
 
@@ -684,6 +765,28 @@ TOOLS = [
                 },
                 "required": ["level"],
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "play_radio",
+            "description": "Stream internet radio or any HTTP audio URL through the robot's speaker.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "HTTP audio stream URL (MP3/AAC)"},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "stop_audio",
+            "description": "Stop any audio currently playing through the robot's speaker.",
+            "parameters": {"type": "object", "properties": {}},
         },
     },
 ]
@@ -846,6 +949,15 @@ async def run_tool(name: str, args: dict) -> str:
         level = int(args.get("level", 1))
         r = await _mcf("SpeedLevel", {"data": level})
         return f"set_speed({level}) → {'ok' if r['ok'] else 'error'}"
+
+    elif name == "play_radio":
+        url = args.get("url", "")
+        if not url:
+            return "error: url required"
+        return await _start_radio(url)
+
+    elif name == "stop_audio":
+        return await _stop_radio()
 
     else:
         return f"unknown tool: {name}"
@@ -1132,6 +1244,10 @@ SAFETY:
 - If the robot looks fallen (rpy pitch/roll > 0.5 rad), use stance(recovery_stand) first.
 - If a move() returns "obstacle detected", reassess with camera before trying again.
 
+AUDIO:
+- play_radio(url) — stream internet radio or any HTTP audio URL through the robot's speaker.
+- stop_audio() — stop playback.
+
 RESPONSE FORMAT:
 - After a tool call completes: briefly describe what you see and what you're doing next (1–2 sentences).
 - When the task is fully done: say so clearly and stop issuing tool calls."""
@@ -1392,8 +1508,19 @@ LOOK / CAMERA
 ROBOT STATE  (F1 or type 'state')
   Shows position, velocity, battery %, rpy, gait type, LiDAR distances
 
+RADIO / AUDIO
+  "play some jazz radio"          play_radio(<url>)
+  "stop the music"                stop_audio()
+  radio <url>                     stream audio to robot speaker directly
+  radio stop                      stop playback
+
+VOICE INPUT
+  Ctrl+M                          toggle mic recording on/off
+                                  (transcribed with Whisper, submitted as command)
+
 KEYBOARD SHORTCUTS
   Enter          Send command
+  Ctrl+M         Toggle microphone recording
   Ctrl+L         Clear conversation history
   Ctrl+E         Toggle error panel
   F1             Show robot state in chat
@@ -1405,6 +1532,8 @@ BUILT-IN TEXT COMMANDS
   state          Print robot state
   clear          Clear conversation
   model <name>   Switch Ollama model (e.g. model llava)
+  radio <url>    Stream audio to robot speaker
+  radio stop     Stop audio playback
 """
 
 from textual.screen import ModalScreen
@@ -1453,6 +1582,7 @@ class Go2App(App):
         ("ctrl+c", "quit", "Quit"),
         ("ctrl+l", "clear_chat", "Clear chat"),
         ("ctrl+e", "toggle_errors", "Errors"),
+        ("ctrl+m", "toggle_mic", "Mic"),
         ("f1", "show_state", "State"),
         ("f2", "show_help", "Help"),
         ("f3", "show_prompt", "Prompt"),
@@ -1470,6 +1600,9 @@ class Go2App(App):
         self._think_timer = None
         self._think_idx = 0
         self._queue: list[str] = []
+        self._recording = False
+        self._recording_chunks: list = []
+        self._recording_stream = None
 
     def compose(self) -> ComposeResult:
         # Top status bar
@@ -1508,7 +1641,7 @@ class Go2App(App):
         # Input area
         with Vertical(id="input-area"):
             yield Label(
-                "Enter: send  │  Ctrl+L: clear  │  Ctrl+E: errors  │  F1: state  │  F2: help  │  F3: prompt  │  Ctrl+C: quit",
+                "Enter: send  │  Ctrl+M: mic  │  Ctrl+L: clear  │  Ctrl+E: errors  │  F1: state  │  F2: help  │  F3: prompt  │  Ctrl+C: quit",
                 id="hint-label",
             )
             yield Input(placeholder="Type a command...", id="user-input")
@@ -1613,6 +1746,13 @@ class Go2App(App):
             self.model = user_input.split(None, 1)[1].strip()
             self.log_chat(f"[dim]Model switched to: {self.model}[/dim]")
             return
+        if user_input.lower() == "radio stop":
+            self._run_stop_radio()
+            return
+        if user_input.lower().startswith("radio "):
+            url = user_input.split(None, 1)[1].strip()
+            self._run_start_radio(url)
+            return
 
         self.log_chat(f"[bold green]You:[/bold green] {escape(user_input)}")
         self._run_turn(user_input)
@@ -1684,6 +1824,90 @@ class Go2App(App):
             )
         finally:
             self.call_from_thread(self._set_processing, False)
+
+    # ── Radio ────────────────────────────────────────────────────────────────
+
+    @work(exclusive=False, thread=True)
+    def _run_start_radio(self, url: str) -> None:
+        self.call_from_thread(self.log_chat, f"[dim]📻 Starting radio: {url}[/dim]")
+        future = asyncio.run_coroutine_threadsafe(_start_radio(url), _main_loop)
+        result = future.result(timeout=15)
+        self.call_from_thread(self.log_chat, f"[dim]{result}[/dim]")
+
+    @work(exclusive=False, thread=True)
+    def _run_stop_radio(self) -> None:
+        future = asyncio.run_coroutine_threadsafe(_stop_radio(), _main_loop)
+        result = future.result(timeout=5)
+        self.call_from_thread(self.log_chat, f"[dim]{result}[/dim]")
+
+    # ── Mic / voice input ────────────────────────────────────────────────────
+
+    def action_toggle_mic(self) -> None:
+        if not _HAS_SD:
+            self.log_chat("[red]Voice input requires sounddevice: uv add sounddevice[/red]")
+            return
+        if self._recording:
+            self._stop_and_transcribe()
+        else:
+            self._start_recording()
+
+    def _start_recording(self) -> None:
+        self._recording_chunks = []
+        self._recording_stream = _sd.InputStream(
+            samplerate=16000, channels=1, dtype="float32",
+            callback=lambda indata, frames, time, status: self._recording_chunks.append(indata.copy()),
+        )
+        self._recording_stream.start()
+        self._recording = True
+        self.query_one("#status-label", Label).update("🎤 Recording... (Ctrl+M to stop)")
+
+    @work(exclusive=False, thread=True)
+    def _stop_and_transcribe(self) -> None:
+        self._recording = False
+        if self._recording_stream:
+            self._recording_stream.stop()
+            self._recording_stream.close()
+            self._recording_stream = None
+
+        if not self._recording_chunks:
+            self.call_from_thread(self.log_chat, "[dim]No audio captured.[/dim]")
+            self.call_from_thread(
+                self.query_one("#status-label", Label).update, "● Go2 Connected"
+            )
+            return
+
+        self.call_from_thread(
+            self.query_one("#status-label", Label).update, "⏳ Transcribing..."
+        )
+        try:
+            audio = np.concatenate(self._recording_chunks).flatten()
+            try:
+                text = _transcribe_audio(audio)
+            except ImportError:
+                self.call_from_thread(
+                    self.log_chat,
+                    "[red]Voice input requires faster-whisper: uv add faster-whisper[/red]",
+                )
+                return
+            if text:
+                self.call_from_thread(
+                    self.log_chat, f"[bold green]You (voice):[/bold green] {escape(text)}"
+                )
+                self.call_from_thread(self._dispatch_voice, text)
+            else:
+                self.call_from_thread(self.log_chat, "[dim]No speech detected.[/dim]")
+        finally:
+            if not self._processing:
+                self.call_from_thread(
+                    self.query_one("#status-label", Label).update, "● Go2 Connected"
+                )
+
+    def _dispatch_voice(self, text: str) -> None:
+        if self._processing:
+            self._queue.append(text)
+            self.log_chat(f"[dim]⏳ Queued: {escape(text)}[/dim]")
+        else:
+            self._run_turn(text)
 
     _THINK_FRAMES = ["⏳ Thinking", "⏳ Thinking.", "⏳ Thinking..", "⏳ Thinking..."]
 
