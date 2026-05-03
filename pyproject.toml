@@ -1,0 +1,20 @@
+[project]
+name = "agentic-unitree-go2"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp[cli]",
+    "uvicorn",
+    "starlette",
+    "opencv-python-headless",
+    "numpy",
+    "pillow",
+    "fastapi",
+    "httpx",
+    "term-image",
+    "textual",
+    "unitree-webrtc-connect",
+]
+
+[tool.uv.sources]
+unitree-webrtc-connect = { git = "https://github.com/jrcichra/unitree_webrtc_connect.git", rev = "justin" }

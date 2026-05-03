@@ -21,15 +21,13 @@ Built on [unitree_webrtc_connect](https://github.com/legion1581/unitree_webrtc_c
 
 ```bash
 # Set up virtual environment and install deps
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+uv sync
 
 # Option 1: MCP Server (for OpenWebUI / Claude Desktop)
-python go2_mcp_server.py --ip 10.0.0.200 --port 8000
+uv run go2_mcp_server.py --ip 10.0.0.200 --port 8000
 
 # Option 2: Natural Language TUI (for direct control)
-python cli.py --ip 10.0.0.200 --model qwen3.5:35b
+uv run cli.py --ip 10.0.0.200 --model qwen3.5:35b
 ```
 
 ---
@@ -42,13 +40,13 @@ A full-featured MCP server exposing 50+ tools for robot control via HTTP (Stream
 
 **Run (HTTP mode — for OpenWebUI):**
 ```bash
-python go2_mcp_server.py --ip 10.0.0.200 --port 8000
+uv run go2_mcp_server.py --ip 10.0.0.200 --port 8000
 ```
 Then configure OpenWebUI: **Admin Panel → Settings → Tools → Add Connection → MCP (Streamable HTTP) → URL: `http://<your-ip>:8000/mcp`**
 
 **Run (stdio mode — for Claude Desktop):**
 ```bash
-python go2_mcp_server.py --stdio
+uv run go2_mcp_server.py --stdio
 ```
 
 **Available tools (50+):**
@@ -73,8 +71,8 @@ python go2_mcp_server.py --stdio
 A full-screen terminal UI for conversational robot control with embedded camera feed.
 
 ```bash
-python cli.py --ip 10.0.0.200 --model qwen3.5:35b
-python cli.py --no-camera  # for headless operation
+uv run cli.py --ip 10.0.0.200 --model qwen3.5:35b
+uv run cli.py --no-camera  # for headless operation
 ```
 
 **Features:**
