@@ -770,6 +770,14 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_volume",
+            "description": "Get the robot's current speaker volume (0–10).",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "set_volume",
             "description": "Set the robot's speaker volume (0=silent, 10=max).",
             "parameters": {
@@ -963,6 +971,20 @@ async def run_tool(name: str, args: dict) -> str:
         level = int(args.get("level", 1))
         r = await _mcf("SpeedLevel", {"data": level})
         return f"set_speed({level}) → {'ok' if r['ok'] else 'error'}"
+
+    elif name == "get_volume":
+        if _conn is None or _conn.datachannel is None:
+            return "error: no connection"
+        resp = await _conn.datachannel.pub_sub.publish_request_new(
+            RTC_TOPIC["VUI"], {"api_id": 1004}
+        )
+        if _code(resp) == 0:
+            try:
+                data = json.loads(resp["data"]["data"])
+                return f"volume: {data.get('volume')}/10"
+            except Exception:
+                pass
+        return "error reading volume"
 
     elif name == "set_volume":
         level = max(0, min(10, int(args.get("level", 5))))
