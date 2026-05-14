@@ -29,6 +29,12 @@ uv sync
 uv run cli.py --ip 10.0.0.200 --model qwen3.5:35b
 ```
 
+**Offline mock mode** (no robot required, simulated state + camera):
+```bash
+uv run cli.py --mock
+uv run go2_mcp_server.py --mock --port 8000
+```
+
 **Option B — MCP Server** (for OpenWebUI / Claude Desktop):
 ```bash
 uv run go2_mcp_server.py --ip 10.0.0.200 --port 8000
@@ -66,6 +72,7 @@ uv run go2_mcp_server.py --stdio
 - **Motion mode**: `set_motion_mode(normal|ai|obstacle_avoidance)`, `get_motion_mode`
 - **Telemetry**: `get_sport_state`, `get_low_state`, `get_multiple_state`, `get_robot_state`
 - **VUI**: `set_led_color`, `set_brightness(0-10)`, `set_volume(0-10)`
+- **Audio**: `play_radio(url)`, `stop_audio()`, `say(text)` for local TTS playback
 - **Sensors**: `lidar_snapshot()` — point cloud + bounding box, `capture_image(quality=1-100)` — base64 JPEG
 
 > **Firmware 1.1.7+ (MCF mode):** The server automatically handles MCF unified mode. Acrobatics work directly — error 7004 is expected and handled gracefully.
@@ -79,6 +86,7 @@ A full-screen terminal UI for conversational robot control with embedded camera 
 ```bash
 uv run cli.py --ip 10.0.0.200 --model qwen3.5:35b
 uv run cli.py --no-camera  # for headless operation
+uv run cli.py --mock       # offline development
 ```
 
 **Features:**
@@ -89,6 +97,8 @@ uv run cli.py --no-camera  # for headless operation
 - **Full-state telemetry**: Position, velocity, battery %, orientation (RPY), gait type, LiDAR obstacle distances
 - **Autonomous tool calling**: move, turn, stance poses, tricks (flips, dances, waves), LED control, speed adjustment
 - **Multi-model support**: Switch between any Ollama model on the fly (`model qwen3.5:35b`)
+- **Voice/audio**: `Ctrl+M` records microphone input, `play_radio` streams audio, `say(text)` speaks via local TTS
+- **Mock mode**: Simulated WebRTC, telemetry, camera frames, motion, volume, audio, and speech without powering on the robot
 - **Conversation history**: Scrollable chat with rich markup highlighting
 - **Error panel**: Toggleable view for debugging connection/command issues
 
@@ -116,6 +126,7 @@ uv run cli.py --no-camera  # for headless operation
 | **Local STA** | Connect to robot as station | `--ip 10.0.0.200` or `--serial <SN>` |
 | **Remote** | Via Unitree cloud | `--remote --serial <SN> --username <user> --password <pass>` |
 | **MCF** (firmware 1.1.7+) | Unified mode — all commands work directly | Automatic |
+| **Mock** | Simulated state/camera/audio, no robot needed | `--mock` |
 
 ---
 
@@ -140,8 +151,8 @@ uv run cli.py --no-camera  # for headless operation
 
 ---
 
-## Todo
+## Audio Notes
 
-- [ ] Audio playback (speakers)
-- [ ] Audio recording (microphone)
-- [ ] Text to speech
+- `play_radio` streams HTTP audio through the robot speaker.
+- `Ctrl+M` in the TUI records microphone input, transcribes it with Whisper, and submits it as a normal command.
+- `say(text)` uses a local TTS engine (`espeak`, `espeak-ng`, or macOS `say`) when available. In `--mock` mode it reports the spoken text without requiring audio hardware.

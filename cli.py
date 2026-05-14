@@ -27,6 +27,9 @@ import warnings
 import logging
 import os
 import io
+import shutil
+import subprocess
+import tempfile
 
 warnings.filterwarnings("ignore")
 os.environ["TERM_IMAGE_LOG_LEVEL"] = "error"
@@ -169,10 +172,151 @@ _context_size: int = 0
 
 # ── Radio / audio playback ────────────────────────────────────────────────────
 _radio_player = None   # aiortc MediaPlayer instance
+_tts_temp_file: str | None = None
 
 # ── Voice / Whisper ───────────────────────────────────────────────────────────
 _whisper_model = None
 _whisper_lock = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# Mock robot for offline development
+# ---------------------------------------------------------------------------
+
+
+def _mock_status(code: int = 0, data=None) -> dict:
+    payload = {
+        "header": {"status": {"code": code}},
+        "data": data if data is not None else "{}",
+    }
+    return {"data": payload}
+
+
+class _MockPubSub:
+    def __init__(self):
+        self._callbacks: dict[str, list] = {}
+        self.volume = 5
+        self.position = [0.0, 0.0, 0.0]
+        self.velocity = [0.0, 0.0, 0.0]
+
+    async def publish_request_new(self, topic, payload):
+        api_id = payload.get("api_id") if isinstance(payload, dict) else None
+        parameter = payload.get("parameter", {}) if isinstance(payload, dict) else {}
+        if api_id == 1003:
+            self.volume = int(parameter.get("volume", self.volume))
+        elif api_id == 1004:
+            return _mock_status(data=json.dumps({"volume": self.volume}))
+        elif isinstance(parameter, dict) and {"x", "y", "z"} & set(parameter):
+            self.velocity = [
+                float(parameter.get("x", 0)),
+                float(parameter.get("y", 0)),
+                float(parameter.get("z", 0)),
+            ]
+            self.position[0] += self.velocity[0] * 0.04
+            self.position[1] += self.velocity[1] * 0.04
+            self.position[2] += self.velocity[2] * 0.04
+            self._emit_state()
+        await asyncio.sleep(0.01)
+        return _mock_status()
+
+    def publish_without_callback(self, topic, payload):
+        return None
+
+    def subscribe(self, topic, callback):
+        self._callbacks.setdefault(topic, []).append(callback)
+        self._emit_state()
+
+    def unsubscribe(self, topic):
+        self._callbacks.pop(topic, None)
+
+    def _emit_state(self):
+        sport = {
+            "position": [round(v, 3) for v in self.position],
+            "velocity": [round(v, 3) for v in self.velocity],
+            "imu_state": {"rpy": [0.0, 0.0, round(self.position[2], 3)]},
+            "body_height": 0.31,
+            "gait_type": 1,
+            "range_obstacle": [0, 0, 0, 0],
+        }
+        low = {"bms_state": {"soc": 87, "voltage": 31.2}}
+        for cb in self._callbacks.get(RTC_TOPIC["LF_SPORT_MOD_STATE"], []):
+            cb({"data": sport})
+        for cb in self._callbacks.get(RTC_TOPIC["LOW_STATE"], []):
+            cb({"data": low})
+
+
+class _MockDataChannel:
+    def __init__(self):
+        self.pub_sub = _MockPubSub()
+
+    async def disableTrafficSaving(self, enabled):
+        return None
+
+
+class _MockFrame:
+    def __init__(self, tick: int):
+        self.tick = tick
+
+    def to_ndarray(self, format="bgr24"):
+        if not _CV2 or np is None:
+            return None
+        h, w = 360, 640
+        img = np.zeros((h, w, 3), dtype=np.uint8)
+        img[:, :] = (32, 40, 48)
+        img[90:260, 60:220] = (40, 120, 220)
+        img[120:310, 390:560] = (80, 180, 90)
+        x = 260 + (self.tick * 7) % 80
+        cv2.circle(img, (x, 180), 38, (230, 230, 70), -1)
+        cv2.putText(
+            img,
+            "MOCK GO2 CAMERA",
+            (170, 45),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (235, 235, 235),
+            2,
+            cv2.LINE_AA,
+        )
+        return img
+
+
+class _MockVideoTrack:
+    def __init__(self):
+        self.tick = 0
+
+    async def recv(self):
+        await asyncio.sleep(1.0)
+        self.tick += 1
+        return _MockFrame(self.tick)
+
+
+class _MockVideoChannel:
+    def __init__(self):
+        self._callbacks = []
+
+    def add_track_callback(self, callback):
+        self._callbacks.append(callback)
+
+    def switchVideoChannel(self, enabled):
+        if enabled:
+            for cb in self._callbacks:
+                asyncio.ensure_future(cb(_MockVideoTrack()))
+
+
+class _MockConnection:
+    mock = True
+
+    def __init__(self):
+        self.datachannel = _MockDataChannel()
+        self.video = _MockVideoChannel()
+        self.pc = None
+
+    async def connect(self):
+        await asyncio.sleep(0.05)
+
+
+def _is_mock_conn() -> bool:
+    return bool(getattr(_conn, "mock", False))
+
 
 # ---------------------------------------------------------------------------
 # Low-level helpers
@@ -558,8 +702,11 @@ def _forward_obstacle_m() -> float:
 # ---------------------------------------------------------------------------
 
 
-async def _start_radio(url: str) -> str:
+async def _play_audio_source(source: str, label: str) -> str:
     global _radio_player
+    if _is_mock_conn():
+        _radio_player = ("mock", source)
+        return f"mock audio playing: {label}"
     try:
         from aiortc.contrib.media import MediaPlayer
     except ImportError:
@@ -568,13 +715,15 @@ async def _start_radio(url: str) -> str:
         return "error: not connected"
     await _stop_radio()
     try:
-        options = {
-            "reconnect": "1",
-            "reconnect_on_network_error": "1",
-            "reconnect_on_http_error": "1",
-            "reconnect_delay_max": "5",
-        }
-        _radio_player = MediaPlayer(url, options=options)
+        options = {}
+        if source.startswith(("http://", "https://")):
+            options = {
+                "reconnect": "1",
+                "reconnect_on_network_error": "1",
+                "reconnect_on_http_error": "1",
+                "reconnect_delay_max": "5",
+            }
+        _radio_player = MediaPlayer(source, options=options)
         # Reuse the existing audio sender so no SDP renegotiation is needed
         senders = _conn.pc.getSenders()
         audio_sender = next((s for s in senders if s.track and s.track.kind == "audio"), None)
@@ -582,26 +731,90 @@ async def _start_radio(url: str) -> str:
             await audio_sender.replaceTrack(_radio_player.audio)
         else:
             _conn.pc.addTrack(_radio_player.audio)
-        return f"radio playing: {url}"
+        return f"audio playing: {label}"
     except Exception as e:
         _radio_player = None
         return f"radio error: {e}"
 
 
+async def _start_radio(url: str) -> str:
+    return await _play_audio_source(url, url)
+
+
 async def _stop_radio() -> str:
-    global _radio_player
+    global _radio_player, _tts_temp_file
     if _radio_player is None:
         return "no audio playing"
     try:
-        senders = _conn.pc.getSenders() if _conn else []
-        audio_sender = next((s for s in senders if s.track and s.track.kind == "audio"), None)
-        if audio_sender:
-            await audio_sender.replaceTrack(None)
-        _radio_player.audio.stop()
+        if not isinstance(_radio_player, tuple):
+            senders = _conn.pc.getSenders() if _conn and _conn.pc else []
+            audio_sender = next((s for s in senders if s.track and s.track.kind == "audio"), None)
+            if audio_sender:
+                await audio_sender.replaceTrack(None)
+            _radio_player.audio.stop()
     except Exception:
         pass
     _radio_player = None
+    if _tts_temp_file:
+        try:
+            os.unlink(_tts_temp_file)
+        except OSError:
+            pass
+        _tts_temp_file = None
     return "audio stopped"
+
+
+def _synthesize_tts_file(text: str) -> tuple[str | None, str | None]:
+    """Create a temporary WAV with a system TTS binary when one is available."""
+    fd, path = tempfile.mkstemp(prefix="go2_tts_", suffix=".wav")
+    os.close(fd)
+    try:
+        espeak = shutil.which("espeak") or shutil.which("espeak-ng")
+        if espeak:
+            subprocess.run(
+                [espeak, "-w", path, text],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=30,
+            )
+            return path, None
+        say = shutil.which("say")
+        if say:
+            aiff_path = path + ".aiff"
+            subprocess.run(
+                [say, "-o", aiff_path, text],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=30,
+            )
+            return aiff_path, None
+        os.unlink(path)
+        return None, "no TTS engine found; install espeak/espeak-ng or use mock mode"
+    except Exception as e:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        return None, f"TTS synthesis failed: {e}"
+
+
+async def _say_text(text: str) -> str:
+    global _tts_temp_file
+    text = " ".join(str(text).split())
+    if not text:
+        return "error: text required"
+    if _is_mock_conn():
+        return f"mock speech: {text}"
+    await _stop_radio()
+    path, err = _synthesize_tts_file(text)
+    if err or path is None:
+        return f"error: {err}"
+    _tts_temp_file = path
+    return await _play_audio_source(path, text[:80])
 
 
 # ---------------------------------------------------------------------------
@@ -821,6 +1034,20 @@ TOOLS = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "say",
+            "description": "Speak a short sentence through the robot's speaker using local text-to-speech.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Short sentence to speak"},
+                },
+                "required": ["text"],
+            },
+        },
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -1015,6 +1242,9 @@ async def run_tool(name: str, args: dict) -> str:
     elif name == "stop_audio":
         return await _stop_radio()
 
+    elif name == "say":
+        return await _say_text(args.get("text", ""))
+
     else:
         return f"unknown tool: {name}"
 
@@ -1026,10 +1256,10 @@ async def run_tool(name: str, args: dict) -> str:
 MAX_HISTORY_TURNS = 20  # keep last N user/assistant pairs to prevent context overflow
 
 
-def _fetch_context_size(model: str, ollama_url: str) -> int:
+def _fetch_context_size(model: str, ollama_url: str, timeout: float = 2.0) -> int:
     """Query Ollama for the model's context window size."""
     try:
-        r = requests.post(f"{ollama_url}/api/show", json={"model": model}, timeout=5)
+        r = requests.post(f"{ollama_url}/api/show", json={"model": model}, timeout=timeout)
         r.raise_for_status()
         info = r.json().get("model_info", {})
         for key, val in info.items():
@@ -1038,6 +1268,22 @@ def _fetch_context_size(model: str, ollama_url: str) -> int:
     except Exception:
         pass
     return 0
+
+
+def _normalize_ollama_url(url: str) -> str:
+    """Accept bare hosts like 10.0.0.43 and normalize to Ollama's HTTP base URL."""
+    url = (url or "").strip()
+    if not url:
+        return "http://localhost:11434"
+    if not url.startswith(("http://", "https://")):
+        url = "http://" + url
+    if "://" in url:
+        scheme, rest = url.split("://", 1)
+        host_port = rest.split("/", 1)[0]
+        if ":" not in host_port:
+            rest = host_port + ":11434" + ("/" + rest.split("/", 1)[1] if "/" in rest else "")
+        url = scheme + "://" + rest
+    return url.rstrip("/")
 
 
 def _ollama_chat(
@@ -1326,6 +1572,7 @@ SAFETY:
 AUDIO:
 - play_radio(url) — stream internet radio or any HTTP audio URL through the robot's speaker.
 - stop_audio() — stop playback.
+- say(text) — speak a short sentence through the robot's speaker using local text-to-speech.
 
 RESPONSE FORMAT:
 - After a tool call completes: briefly describe what you see and what you're doing next (1–2 sentences).
@@ -1490,6 +1737,8 @@ class InlineCameraWidget(Static):
         self._last_emit_ts: float = 0.0
         self._use_inline = False
         self._consecutive_failures: int = 0
+        self._last_render_ts: float = -1.0
+        self._last_render_text = None
 
     def on_mount(self) -> None:
         self._use_inline = _IMAGE_PROTOCOL in ("iterm2", "kitty")
@@ -1500,8 +1749,12 @@ class InlineCameraWidget(Static):
             # For inline protocol, return a placeholder — the actual image
             # is emitted via _emit_to_tty() called from refresh hook.
             return Text(f" 📷 {_IMAGE_PROTOCOL} ", style="dim")
-        else:
-            return _frame_to_rich_text()
+        with _frame_lock:
+            ts = _latest_frame_ts
+        if self._last_render_text is None or ts != self._last_render_ts:
+            self._last_render_ts = ts
+            self._last_render_text = _frame_to_rich_text()
+        return self._last_render_text
 
     def on_idle(self) -> None:
         """After each render cycle, emit inline image if protocol supports it."""
@@ -1598,6 +1851,7 @@ RADIO / AUDIO  (just tell the model naturally)
   "play the radio"                plays default station
   "play <url>"                    streams any HTTP audio URL
   "stop the music"                stops playback
+  "say hello"                     speaks through the robot speaker if TTS is installed
 
 VOICE INPUT
   Ctrl+M                          toggle mic recording on/off
@@ -1675,7 +1929,7 @@ class Go2App(App):
         super().__init__()
         self.args = args
         self.model = args.model
-        self.ollama_url = args.ollama
+        self.ollama_url = _normalize_ollama_url(args.ollama)
         self.use_camera = not args.no_camera
         self.history: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
         self._processing = False
@@ -1686,11 +1940,14 @@ class Go2App(App):
         self._recording = False
         self._recording_chunks: list = []
         self._recording_stream = None
+        self._context_fetching = False
+        self._last_context_fetch_ts = 0.0
 
     def compose(self) -> ComposeResult:
         # Top status bar
         with Horizontal(id="top-bar"):
-            yield Label("● Go2 Connected", id="status-label")
+            status = "● Mock Go2" if self.args.mock else "● Go2 Connected"
+            yield Label(status, id="status-label")
             yield Label("🔋 ?%", id="battery-label")
             yield Label("ctx: ?%", id="context-label")
 
@@ -1735,19 +1992,20 @@ class Go2App(App):
         self.log_chat(
             "[bold cyan]Go2 CLI[/bold cyan] ready. "
             f"Model: [yellow]{self.model}[/yellow]  "
-            f"Ollama: [dim]{self.ollama_url}[/dim]"
+            f"Ollama: [dim]{self.ollama_url}[/dim]  "
+            f"Mode: [yellow]{'mock' if self.args.mock else 'robot'}[/yellow]"
         )
         self.log_chat(
             "[dim]Type commands below. The robot awaits your instructions.[/dim]"
         )
         self.query_one("#user-input", Input).focus()
         # Start camera update loop
-        self.set_interval(1.0, self._refresh_camera)
+        self.set_interval(1.5 if self.args.mock else 1.0, self._refresh_camera)
         # Start battery/state update loop
         self.set_interval(5.0, self._refresh_status)
-        # Start context tracking
-        self._refresh_context()
+        # Start context tracking. Model metadata is fetched off the UI thread.
         self.set_interval(2.0, self._refresh_context)
+        self._refresh_context()
 
     def _refresh_camera(self) -> None:
         """Render camera using inline image protocol if available, else halfblock."""
@@ -1762,16 +2020,39 @@ class Go2App(App):
 
     def _refresh_context(self) -> None:
         global _context_size
+        label = self.query_one("#context-label", Label)
         if _context_size == 0:
-            _context_size = _fetch_context_size(self.model, self.ollama_url)
+            now = time.monotonic()
+            if not self._context_fetching and now - self._last_context_fetch_ts > 30:
+                self._context_fetching = True
+                self._last_context_fetch_ts = now
+                label.update("ctx: ...")
+                threading.Thread(
+                    target=self._fetch_context_size_background,
+                    daemon=True,
+                ).start()
+            elif not self._context_fetching:
+                label.update("ctx: ?")
+            return
         if _context_size > 0:
             if _last_prompt_tokens > 0:
                 pct = int((_last_prompt_tokens / _context_size) * 100)
-                label = self.query_one("#context-label", Label)
                 label.update(f"ctx: {_last_prompt_tokens}/{_context_size} ({pct}%)")
             else:
-                label = self.query_one("#context-label", Label)
                 label.update(f"ctx: 0/{_context_size} (0%)")
+
+    def _fetch_context_size_background(self) -> None:
+        global _context_size
+        try:
+            size = _fetch_context_size(self.model, self.ollama_url, timeout=1.5)
+            if size > 0:
+                _context_size = size
+        finally:
+            self.call_from_thread(self._finish_context_fetch)
+
+    def _finish_context_fetch(self) -> None:
+        self._context_fetching = False
+        self._refresh_context()
 
     def log_chat(self, message: str, markup: bool = True) -> None:
         log = self.query_one("#chat-log", RichLog)
@@ -1923,20 +2204,28 @@ class Go2App(App):
         if not _HAS_SD:
             self.log_chat("[red]Voice input requires sounddevice: uv add sounddevice[/red]")
             return
+        if np is None:
+            self.log_chat("[red]Voice input requires numpy.[/red]")
+            return
         if self._recording:
             self._stop_and_transcribe()
         else:
             self._start_recording()
 
     def _start_recording(self) -> None:
-        self._recording_chunks = []
-        self._recording_stream = _sd.InputStream(
-            samplerate=16000, channels=1, dtype="float32",
-            callback=lambda indata, frames, time, status: self._recording_chunks.append(indata.copy()),
-        )
-        self._recording_stream.start()
-        self._recording = True
-        self.query_one("#status-label", Label).update("🎤 Recording... (Ctrl+M to stop)")
+        try:
+            self._recording_chunks = []
+            self._recording_stream = _sd.InputStream(
+                samplerate=16000, channels=1, dtype="float32",
+                callback=lambda indata, frames, time, status: self._recording_chunks.append(indata.copy()),
+            )
+            self._recording_stream.start()
+            self._recording = True
+            self.query_one("#status-label", Label).update("🎤 Recording... (Ctrl+M to stop)")
+        except Exception as e:
+            self._recording = False
+            self._recording_stream = None
+            self.log_chat(f"[red]Could not start microphone: {escape(str(e))}[/red]")
 
     @work(exclusive=False, thread=True)
     def _stop_and_transcribe(self) -> None:
@@ -1949,7 +2238,7 @@ class Go2App(App):
         if not self._recording_chunks:
             self.call_from_thread(self.log_chat, "[dim]No audio captured.[/dim]")
             self.call_from_thread(
-                self.query_one("#status-label", Label).update, "● Go2 Connected"
+                self.query_one("#status-label", Label).update, self._idle_status()
             )
             return
 
@@ -1976,7 +2265,7 @@ class Go2App(App):
         finally:
             if not self._processing:
                 self.call_from_thread(
-                    self.query_one("#status-label", Label).update, "● Go2 Connected"
+                    self.query_one("#status-label", Label).update, self._idle_status()
                 )
 
     def _dispatch_voice(self, text: str) -> None:
@@ -1997,7 +2286,7 @@ class Go2App(App):
             if self._think_timer is not None:
                 self._think_timer.stop()
                 self._think_timer = None
-            self.query_one("#status-label", Label).update("● Go2 Connected")
+            self.query_one("#status-label", Label).update(self._idle_status())
             self.query_one("#user-input", Input).focus()
             if self._queue:
                 next_input = self._queue.pop(0)
@@ -2007,6 +2296,9 @@ class Go2App(App):
     def _tick_thinking(self) -> None:
         self._think_idx = (self._think_idx + 1) % len(self._THINK_FRAMES)
         self.query_one("#status-label", Label).update(self._THINK_FRAMES[self._think_idx])
+
+    def _idle_status(self) -> str:
+        return "● Mock Go2" if self.args.mock else "● Go2 Connected"
 
     async def action_quit(self) -> None:
         self.log_chat("[dim]Stopping robot...[/dim]")
@@ -2025,6 +2317,16 @@ class Go2App(App):
 
 async def connect(args: argparse.Namespace) -> None:
     global _conn
+    if args.mock:
+        print("Starting mock Go2...", end=" ", flush=True)
+        _conn = _MockConnection()
+        await _conn.connect()
+        print("ready!")
+        _setup_state()
+        if not args.no_camera:
+            await _start_camera()
+        return
+
     print("Connecting to Go2...", end=" ", flush=True)
 
     if args.remote:
@@ -2073,21 +2375,31 @@ async def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  uv run cli.py --mock
   uv run cli.py --ip 10.0.0.200
   uv run cli.py --ip 10.0.0.200 --model llava
   uv run cli.py --ip 10.0.0.200 --no-camera
         """,
     )
-    p.add_argument("--ip", required=True)
+    p.add_argument("--ip", default=None)
     p.add_argument("--serial", default=None)
     p.add_argument("--remote", action="store_true")
+    p.add_argument("--mock", action="store_true", help="Run without a robot using simulated state and camera")
     p.add_argument("--username", default=None)
     p.add_argument("--password", default=None)
     p.add_argument("--model", default="qwen3.6:27b")
-    p.add_argument("--ollama", default="http://localhost:11434")
+    p.add_argument(
+        "--ollama",
+        default="http://localhost:11434",
+        help="Ollama base URL or host. Examples: http://localhost:11434, 10.0.0.43, 10.0.0.43:11434",
+    )
     p.add_argument("--no-camera", action="store_true")
     p.add_argument("--quality", default=75, type=int, help="JPEG quality 1-100")
     args = p.parse_args()
+
+    if not args.mock and not args.ip and not args.serial and not args.remote:
+        args.ip = "10.0.0.200"
+    args.ollama = _normalize_ollama_url(args.ollama)
 
     global _main_loop, _IMAGE_PROTOCOL
     _main_loop = asyncio.get_event_loop()

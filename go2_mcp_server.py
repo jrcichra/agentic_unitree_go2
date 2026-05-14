@@ -24,6 +24,10 @@ import argparse
 import json
 import logging
 import sys
+import os
+import shutil
+import subprocess
+import tempfile
 from typing import Any
 
 import base64
@@ -114,6 +118,148 @@ _latest_multi_state: dict = {}
 _latest_frame_jpg: bytes | None = None
 _latest_frame_ts: float = 0.0  # unix time of last frame
 _video_track = None  # aiortc VideoStreamTrack from the robot
+_audio_player = None
+_tts_temp_file: str | None = None
+
+
+def _mock_status(code: int = 0, data=None) -> dict:
+    return {
+        "data": {
+            "header": {"status": {"code": code}},
+            "data": data if data is not None else "{}",
+        }
+    }
+
+
+class _MockPubSub:
+    def __init__(self):
+        self._callbacks: dict[str, list] = {}
+        self.volume = 5
+        self.position = [0.0, 0.0, 0.0]
+        self.velocity = [0.0, 0.0, 0.0]
+
+    async def publish_request_new(self, topic, payload):
+        api_id = payload.get("api_id") if isinstance(payload, dict) else None
+        parameter = payload.get("parameter", {}) if isinstance(payload, dict) else {}
+        if api_id == 1003:
+            self.volume = int(parameter.get("volume", self.volume))
+        elif api_id == 1004:
+            return _mock_status(data=json.dumps({"volume": self.volume}))
+        elif isinstance(parameter, dict) and {"x", "y", "z"} & set(parameter):
+            self.velocity = [
+                float(parameter.get("x", 0)),
+                float(parameter.get("y", 0)),
+                float(parameter.get("z", 0)),
+            ]
+            self.position[0] += self.velocity[0] * 0.05
+            self.position[1] += self.velocity[1] * 0.05
+            self.position[2] += self.velocity[2] * 0.05
+            self._emit_state()
+        await asyncio.sleep(0.01)
+        return _mock_status()
+
+    def publish_without_callback(self, topic, payload):
+        return None
+
+    def subscribe(self, topic, callback):
+        self._callbacks.setdefault(topic, []).append(callback)
+        self._emit_state()
+
+    def unsubscribe(self, topic):
+        self._callbacks.pop(topic, None)
+
+    def _emit_state(self):
+        sport = {
+            "position": [round(v, 3) for v in self.position],
+            "velocity": [round(v, 3) for v in self.velocity],
+            "imu_state": {"rpy": [0.0, 0.0, round(self.position[2], 3)]},
+            "body_height": 0.31,
+            "gait_type": 1,
+            "range_obstacle": [0, 0, 0, 0],
+        }
+        low = {"bms_state": {"soc": 87, "voltage": 31.2}}
+        multi = {"volume": self.volume, "mode": "mock"}
+        for cb in self._callbacks.get(RTC_TOPIC["LF_SPORT_MOD_STATE"], []):
+            cb({"data": sport})
+        for cb in self._callbacks.get(RTC_TOPIC["LOW_STATE"], []):
+            cb({"data": low})
+        for cb in self._callbacks.get(RTC_TOPIC["MULTIPLE_STATE"], []):
+            cb({"data": json.dumps(multi)})
+
+
+class _MockDataChannel:
+    def __init__(self):
+        self.pub_sub = _MockPubSub()
+
+    async def disableTrafficSaving(self, enabled):
+        return None
+
+
+class _MockFrame:
+    def __init__(self, tick: int):
+        self.tick = tick
+
+    def to_ndarray(self, format="bgr24"):
+        if not _CV2_AVAILABLE:
+            return None
+        h, w = 360, 640
+        img = np.zeros((h, w, 3), dtype=np.uint8)
+        img[:, :] = (32, 40, 48)
+        img[90:260, 60:220] = (40, 120, 220)
+        img[120:310, 390:560] = (80, 180, 90)
+        x = 260 + (self.tick * 7) % 80
+        cv2.circle(img, (x, 180), 38, (230, 230, 70), -1)
+        cv2.putText(
+            img,
+            "MOCK GO2 CAMERA",
+            (170, 45),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (235, 235, 235),
+            2,
+            cv2.LINE_AA,
+        )
+        return img
+
+
+class _MockVideoTrack:
+    def __init__(self):
+        self.tick = 0
+
+    async def recv(self):
+        await asyncio.sleep(0.25)
+        self.tick += 1
+        return _MockFrame(self.tick)
+
+
+class _MockVideoChannel:
+    def __init__(self):
+        self._callbacks = []
+
+    def add_track_callback(self, callback):
+        self._callbacks.append(callback)
+
+    def switchVideoChannel(self, enabled):
+        if enabled:
+            for cb in self._callbacks:
+                asyncio.ensure_future(cb(_MockVideoTrack()))
+
+
+class _MockConnection:
+    mock = True
+
+    def __init__(self):
+        self.datachannel = _MockDataChannel()
+        self.video = _MockVideoChannel()
+        self.pc = None
+
+    async def connect(self):
+        await asyncio.sleep(0.05)
+
+
+def _is_mock_conn(conn=None) -> bool:
+    target = conn if conn is not None else _conn
+    return bool(getattr(target, "mock", False))
 
 
 async def get_conn() -> UnitreeWebRTCConnection:
@@ -580,6 +726,36 @@ async def list_tools() -> list[types.Tool]:
             description="Get current speaker volume (0-10).",
             inputSchema={"type": "object", "properties": {}},
         ),
+        types.Tool(
+            name="play_radio",
+            description="Stream internet radio or any HTTP audio URL through the robot speaker.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "HTTP audio stream URL. Defaults to https://nashe1.hostingradio.ru:80/ultra-128.mp3",
+                    }
+                },
+                "required": [],
+            },
+        ),
+        types.Tool(
+            name="stop_audio",
+            description="Stop audio currently playing through the robot speaker.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="say",
+            description="Speak a short sentence through the robot speaker using local text-to-speech.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Short sentence to speak"}
+                },
+                "required": ["text"],
+            },
+        ),
         # ── LiDAR ─────────────────────────────────────────────────────────────
         types.Tool(
             name="lidar_snapshot",
@@ -637,6 +813,114 @@ _FLIP_MAP = {
     "left": "LeftFlip",
     "right": "RightFlip",
 }
+
+
+async def _play_audio_source(conn, source: str, label: str) -> dict:
+    global _audio_player
+    if _is_mock_conn(conn):
+        _audio_player = ("mock", source)
+        return {"status": "ok", "audio": label, "mode": "mock"}
+    try:
+        from aiortc.contrib.media import MediaPlayer
+    except ImportError:
+        return {"status": "error", "message": "aiortc MediaPlayer not available"}
+    await _stop_audio(conn)
+    try:
+        options = {}
+        if source.startswith(("http://", "https://")):
+            options = {
+                "reconnect": "1",
+                "reconnect_on_network_error": "1",
+                "reconnect_on_http_error": "1",
+                "reconnect_delay_max": "5",
+            }
+        _audio_player = MediaPlayer(source, options=options)
+        senders = conn.pc.getSenders()
+        audio_sender = next((s for s in senders if s.track and s.track.kind == "audio"), None)
+        if audio_sender:
+            await audio_sender.replaceTrack(_audio_player.audio)
+        else:
+            conn.pc.addTrack(_audio_player.audio)
+        return {"status": "ok", "audio": label}
+    except Exception as e:
+        _audio_player = None
+        return {"status": "error", "message": str(e)}
+
+
+async def _stop_audio(conn) -> dict:
+    global _audio_player, _tts_temp_file
+    if _audio_player is None:
+        return {"status": "ok", "message": "no audio playing"}
+    try:
+        if not isinstance(_audio_player, tuple):
+            senders = conn.pc.getSenders() if getattr(conn, "pc", None) else []
+            audio_sender = next((s for s in senders if s.track and s.track.kind == "audio"), None)
+            if audio_sender:
+                await audio_sender.replaceTrack(None)
+            _audio_player.audio.stop()
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    finally:
+        _audio_player = None
+        if _tts_temp_file:
+            try:
+                os.unlink(_tts_temp_file)
+            except OSError:
+                pass
+            _tts_temp_file = None
+    return {"status": "ok", "message": "audio stopped"}
+
+
+def _synthesize_tts_file(text: str) -> tuple[str | None, str | None]:
+    fd, path = tempfile.mkstemp(prefix="go2_tts_", suffix=".wav")
+    os.close(fd)
+    try:
+        espeak = shutil.which("espeak") or shutil.which("espeak-ng")
+        if espeak:
+            subprocess.run(
+                [espeak, "-w", path, text],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=30,
+            )
+            return path, None
+        say = shutil.which("say")
+        if say:
+            aiff_path = path + ".aiff"
+            subprocess.run(
+                [say, "-o", aiff_path, text],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=30,
+            )
+            return aiff_path, None
+        os.unlink(path)
+        return None, "no TTS engine found; install espeak/espeak-ng or use --mock"
+    except Exception as e:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        return None, f"TTS synthesis failed: {e}"
+
+
+async def _say_text(conn, text: str) -> dict:
+    global _tts_temp_file
+    text = " ".join(str(text).split())
+    if not text:
+        return {"status": "error", "message": "text required"}
+    if _is_mock_conn(conn):
+        return {"status": "ok", "speech": text, "mode": "mock"}
+    await _stop_audio(conn)
+    path, err = _synthesize_tts_file(text)
+    if err or path is None:
+        return {"status": "error", "message": err}
+    _tts_temp_file = path
+    return await _play_audio_source(conn, path, text[:80])
 
 
 # ---------------------------------------------------------------------------
@@ -984,8 +1268,27 @@ async def _dispatch(conn: UnitreeWebRTCConnection, name: str, args: dict) -> dic
             return {"status": "ok", "volume": data.get("volume")}
         return {"status": "error", "response_code": code}
 
+    elif name == "play_radio":
+        url = args.get("url") or "https://nashe1.hostingradio.ru:80/ultra-128.mp3"
+        return await _play_audio_source(conn, url, url)
+
+    elif name == "stop_audio":
+        return await _stop_audio(conn)
+
+    elif name == "say":
+        return await _say_text(conn, args.get("text", ""))
+
     # ── LiDAR ─────────────────────────────────────────────────────────────────
     elif name == "lidar_snapshot":
+        if _is_mock_conn(conn):
+            return {
+                "status": "ok",
+                "mode": "mock",
+                "point_count": 4,
+                "bounding_box": {"x_m": [0.8, 2.4], "y_m": [-0.7, 0.9], "z_m": [0.0, 1.1]},
+                "origin": "mock",
+                "resolution": 0.05,
+            }
         snap: dict = {}
         event = asyncio.Event()
 
@@ -1195,6 +1498,13 @@ async def _setup_video_track(conn: UnitreeWebRTCConnection) -> None:
 
 
 async def _connect_robot(args: argparse.Namespace) -> UnitreeWebRTCConnection:
+    if args.mock:
+        print("[go2-mcp] Starting mock Go2 connection.", file=sys.stderr)
+        conn = _MockConnection()
+        await conn.connect()
+        print("[go2-mcp] Mock Go2 ready.", file=sys.stderr)
+        return conn
+
     print("[go2-mcp] Connecting to Go2 via WebRTC ...", file=sys.stderr)
     if args.remote:
         conn = UnitreeWebRTCConnection(
@@ -1285,6 +1595,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ip", default="10.0.0.200", help="Robot IP (default: 10.0.0.200)")
     p.add_argument("--serial", help="Robot serial number")
     p.add_argument("--remote", action="store_true")
+    p.add_argument("--mock", action="store_true", help="Run without a robot using simulated state and camera")
     p.add_argument("--username", help="Unitree account email (remote mode)")
     p.add_argument("--password", help="Unitree account password (remote mode)")
     p.add_argument("--host", default="0.0.0.0")
