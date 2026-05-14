@@ -17,5 +17,28 @@ dependencies = [
     "faster-whisper",
 ]
 
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.scripts]
+go2-tui = "agentic_unitree_go2.apps.tui:run"
+go2-mcp = "agentic_unitree_go2.apps.mcp_server:main"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint.per-file-ignores]
+"agentic_unitree_go2/apps/tui.py" = ["E402"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
 [tool.uv.sources]
 unitree-webrtc-connect = { git = "https://github.com/jrcichra/unitree_webrtc_connect.git", rev = "justin" }

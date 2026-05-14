@@ -10,8 +10,8 @@ Built on [unitree_webrtc_connect](https://github.com/legion1581/unitree_webrtc_c
 
 | Tool | Best For | Interface |
 |------|----------|-----------|
-| **`go2_mcp_server.py`** | AI assistants (OpenWebUI, Claude Desktop) | 50+ MCP tools |
-| **`cli.py`** | Assign tasks — "find the red chair", "go to the kitchen" | Terminal TUI |
+| **`go2-mcp`** | AI assistants (OpenWebUI, Claude Desktop) | 50+ MCP tools |
+| **`go2-tui`** | Assign tasks — "find the red chair", "go to the kitchen" | Terminal TUI |
 
 ![Go2 CLI Screenshot](assets/tui.png)
 
@@ -26,18 +26,18 @@ uv sync
 
 **Option A — Natural Language TUI** (standalone, talks to robot + an LLM provider):
 ```bash
-uv run cli.py --ip 10.0.0.200 --model qwen3.5:35b
+uv run go2-tui --ip 10.0.0.200 --model qwen3.5:35b
 ```
 
 **Offline mock mode** (no robot required, simulated state + camera):
 ```bash
-uv run cli.py --mock
-uv run go2_mcp_server.py --mock --port 8000
+uv run go2-tui --mock
+uv run go2-mcp --mock --port 8000
 ```
 
 **Option B — MCP Server** (for OpenWebUI / Claude Desktop):
 ```bash
-uv run go2_mcp_server.py --ip 10.0.0.200 --port 8000
+uv run go2-mcp --ip 10.0.0.200 --port 8000
 ```
 
 Pick one. They are independent.
@@ -52,13 +52,13 @@ A full-featured MCP server exposing 50+ tools for robot control via HTTP (Stream
 
 **Run (HTTP mode — for OpenWebUI):**
 ```bash
-uv run go2_mcp_server.py --ip 10.0.0.200 --port 8000
+uv run go2-mcp --ip 10.0.0.200 --port 8000
 ```
 Then configure OpenWebUI: **Admin Panel → Settings → Tools → Add Connection → MCP (Streamable HTTP) → URL: `http://<your-ip>:8000/mcp`**
 
 **Run (stdio mode — for Claude Desktop):**
 ```bash
-uv run go2_mcp_server.py --stdio
+uv run go2-mcp --stdio
 ```
 
 **Available tools (50+):**
@@ -84,12 +84,12 @@ uv run go2_mcp_server.py --stdio
 A full-screen terminal UI for conversational robot control with embedded camera feed.
 
 ```bash
-uv run cli.py --ip 10.0.0.200 --model qwen3.5:35b
-uv run cli.py --provider openai --model gpt-4.1
-uv run cli.py --provider anthropic --model claude-sonnet-4-5
-uv run cli.py --no-camera  # for headless operation
-uv run cli.py --mock       # offline development
-uv run cli.py -c           # continue the most recent saved chat session
+uv run go2-tui --ip 10.0.0.200 --model qwen3.5:35b
+uv run go2-tui --provider openai --model gpt-4.1
+uv run go2-tui --provider anthropic --model claude-sonnet-4-5
+uv run go2-tui --no-camera  # for headless operation
+uv run go2-tui --mock       # offline development
+uv run go2-tui -c           # continue the most recent saved chat session
 ```
 
 **LLM providers:**
@@ -163,7 +163,10 @@ uv run cli.py -c           # continue the most recent saved chat session
 
 ## Architecture
 
+- **Package layout**: Runtime code lives under `agentic_unitree_go2/`; root `cli.py` and `go2_mcp_server.py` remain as compatibility wrappers
+- **Entrypoints**: `go2-tui` launches the Textual app, `go2-mcp` launches HTTP or stdio MCP transport
 - **Communication**: WebRTC via `unitree_webrtc_connect` library
+- **Shared robot layer**: Connection selection, mock robot, and safety governor are reusable package modules
 - **Camera**: VideoTrack streamed via WebRTC, converted to JPEG for display
 - **MCP Server**: Implements MCP protocol (list_tools, call_tool, capabilities) for LLM integration
 - **TUI**: Textual framework with inline image rendering via terminal escape sequences
