@@ -162,6 +162,7 @@ _dog_audio_recording = False
 _dog_audio_chunks: list = []
 _dog_audio_sample_rate = 16000
 _dog_audio_enabled = False
+_cancel_requested = threading.Event()
 
 # ── Context tracking ─────────────────────────────────────────────────────────
 _last_prompt_tokens: int = 0
@@ -174,6 +175,110 @@ _tts_temp_file: str | None = None
 # ── Voice / Whisper ───────────────────────────────────────────────────────────
 _whisper_model = None
 _whisper_lock = threading.Lock()
+
+# ── Runtime safety governor ──────────────────────────────────────────────────
+_safety_config = {
+    "max_step_m": 1.0,
+    "max_turn_deg": 720.0,
+    "allow_acrobatics": False,
+}
+
+_HIGH_RISK_TRICKS = {
+    "front_flip",
+    "back_flip",
+    "left_flip",
+    "right_flip",
+    "handstand",
+    "front_jump",
+    "front_pounce",
+}
+
+
+def _as_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _robot_is_fallen() -> bool:
+    rpy = _state_summary().get("rpy_rad", [0, 0, 0])
+    if not isinstance(rpy, list) or len(rpy) < 2:
+        return False
+    return abs(_as_float(rpy[0])) > 0.5 or abs(_as_float(rpy[1])) > 0.5
+
+
+def _motion_blocked_by_state(name: str) -> str | None:
+    recovery_tools = {"stance"}
+    if _robot_is_fallen():
+        if name == "stance":
+            return None
+        return "safety governor: robot appears fallen; use stance(recovery_stand) first"
+    return None
+
+
+def _govern_tool(name: str, args: dict) -> tuple[bool, dict, str | None]:
+    """Validate and clamp LLM-requested robot actions before hardware dispatch."""
+    args = dict(args or {})
+    if _cancel_requested.is_set() and name not in {"stance", "stop_audio"}:
+        return False, args, "cancelled: robot command ignored"
+
+    if name == "move":
+        blocked = _motion_blocked_by_state(name)
+        if blocked:
+            return False, args, blocked
+
+        x = _as_float(args.get("x", 0))
+        y = _as_float(args.get("y", 0))
+        z = _as_float(args.get("z", 0))
+        max_step = float(_safety_config["max_step_m"])
+        max_yaw = float(_safety_config["max_turn_deg"]) * 3.141592653589793 / 180.0
+        clamped = False
+        for key, value, limit in (("x", x, max_step), ("y", y, max_step), ("z", z, max_yaw)):
+            new_value = max(-limit, min(limit, value))
+            if new_value != value:
+                clamped = True
+            args[key] = new_value
+        if args["x"] > 0:
+            dist = _forward_obstacle_m()
+            if 0 < dist < OBSTACLE_STOP_M:
+                return False, args, f"safety governor: forward obstacle at {dist:.2f}m"
+        if clamped:
+            return True, args, f"safety governor: command clamped to x={args['x']:.2f}, y={args['y']:.2f}, z={args['z']:.2f}"
+        return True, args, None
+
+    if name == "turn":
+        blocked = _motion_blocked_by_state(name)
+        if blocked:
+            return False, args, blocked
+        deg = _as_float(args.get("degrees", 0))
+        max_turn = float(_safety_config["max_turn_deg"])
+        clamped = max(-max_turn, min(max_turn, deg))
+        args["degrees"] = clamped
+        if clamped != deg:
+            return True, args, f"safety governor: turn clamped to {clamped:.1f} degrees"
+        return True, args, None
+
+    if name == "trick":
+        blocked = _motion_blocked_by_state(name)
+        if blocked:
+            return False, args, blocked
+        trick = str(args.get("name", ""))
+        if trick in _HIGH_RISK_TRICKS and not _safety_config["allow_acrobatics"]:
+            return False, args, f"safety governor: {trick} is disabled; restart with --allow-acrobatics to enable it"
+        return True, args, None
+
+    if name == "look":
+        for key in ("roll", "pitch", "yaw"):
+            value = _as_float(args.get(key, 0))
+            args[key] = max(-0.35, min(0.35, value))
+        return True, args, None
+
+    if name == "led":
+        args["duration"] = max(1, min(30, int(_as_float(args.get("duration", 3), 3))))
+        return True, args, None
+
+    return True, args, None
 
 # ---------------------------------------------------------------------------
 # Mock robot for offline development
@@ -1165,26 +1270,34 @@ async def _velocity_loop(vx: float, vy: float, vyaw: float, duration_s: float) -
     loop = asyncio.get_event_loop()
     deadline = loop.time() + duration_s
     ok = True
-    while loop.time() < deadline:
-        # Obstacle guard: only for forward motion
-        if vx > 0:
-            dist = _forward_obstacle_m()
-            if 0 < dist < OBSTACLE_STOP_M:
-                await _mcf("Move", {"x": 0, "y": 0, "z": 0})
-                return "obstacle"
-        r = await _mcf("Move", {"x": vx, "y": vy, "z": vyaw})
-        if not r.get("ok", False):
-            ok = False
-        # Sleep only as long as needed — don't overshoot the deadline
-        remaining = deadline - loop.time()
-        if remaining > 0:
-            await asyncio.sleep(min(MOVE_TICK_S, remaining))
-    # Send stop
-    await _mcf("Move", {"x": 0, "y": 0, "z": 0})
+    try:
+        while loop.time() < deadline:
+            if _cancel_requested.is_set():
+                return "cancelled"
+            # Obstacle guard: only for forward motion
+            if vx > 0:
+                dist = _forward_obstacle_m()
+                if 0 < dist < OBSTACLE_STOP_M:
+                    return "obstacle"
+            r = await _mcf("Move", {"x": vx, "y": vy, "z": vyaw})
+            if not r.get("ok", False):
+                ok = False
+            # Sleep only as long as needed — don't overshoot the deadline
+            remaining = deadline - loop.time()
+            if remaining > 0:
+                await asyncio.sleep(min(MOVE_TICK_S, remaining))
+    finally:
+        # Always send stop, including cancellation and exceptions.
+        await _mcf("Move", {"x": 0, "y": 0, "z": 0})
     return ok
 
 
 async def run_tool(name: str, args: dict) -> str:
+    allowed, governed_args, note = _govern_tool(name, args)
+    args = governed_args
+    if not allowed:
+        return note or f"safety governor: blocked {name}"
+
     if name == "move":
         # x/y are distances in metres; z is yaw in radians
         # Convert to velocity commands with appropriate durations
@@ -1204,24 +1317,32 @@ async def run_tool(name: str, args: dict) -> str:
             result = await _velocity_loop(WALK_SPEED * (1 if x > 0 else -1), 0, 0, dur)
             if result == "obstacle":
                 return f"move(x={x:.2f}m) → stopped: obstacle detected within {OBSTACLE_STOP_M}m"
+            if result == "cancelled":
+                return "move → cancelled and stopped"
             if not result:
                 errors.append("x")
             await asyncio.sleep(0.2)
         # Handle y (strafe left/right)
         if abs(y) > 0.01:
             dur = abs(y) / STRAFE_SPEED
-            ok = await _velocity_loop(0, STRAFE_SPEED * (1 if y > 0 else -1), 0, dur)
-            if not ok:
+            result = await _velocity_loop(0, STRAFE_SPEED * (1 if y > 0 else -1), 0, dur)
+            if result == "cancelled":
+                return "move → cancelled and stopped"
+            if not result:
                 errors.append("y")
             await asyncio.sleep(0.2)
         # Handle z (yaw) if someone passes it directly
         if abs(z) > 0.01:
             dur = abs(z) / YAW_RATE
-            ok = await _velocity_loop(0, 0, YAW_RATE * (1 if z > 0 else -1), dur)
-            if not ok:
+            result = await _velocity_loop(0, 0, YAW_RATE * (1 if z > 0 else -1), dur)
+            if result == "cancelled":
+                return "move → cancelled and stopped"
+            if not result:
                 errors.append("z")
 
         status = "ok" if not errors else f"errors on {errors}"
+        if note:
+            status = f"{status}; {note}"
         return f"move(x={x:.2f}m, y={y:.2f}m) → {status}"
 
     elif name == "turn":
@@ -1231,8 +1352,13 @@ async def run_tool(name: str, args: dict) -> str:
         YAW_RATE_ACTUAL = 0.6  # empirical actual rotation rate at that command
         duration = rad / YAW_RATE_ACTUAL
         sign = 1.0 if deg > 0 else -1.0
-        ok = await _velocity_loop(0, 0, YAW_RATE_CMD * sign, duration)
+        result = await _velocity_loop(0, 0, YAW_RATE_CMD * sign, duration)
+        if result == "cancelled":
+            return "turn → cancelled and stopped"
+        ok = bool(result)
         status = "ok" if ok else "error"
+        if note:
+            status = f"{status}; {note}"
         return f"turn({deg:.1f}°, {duration:.1f}s) → {status}"
 
     elif name == "stance":
@@ -1541,6 +1667,8 @@ async def process_turn(
 
     max_iterations = 10
     for iteration in range(max_iterations):
+        if _cancel_requested.is_set():
+            return "Cancelled."
         trimmed = _trim_history(history)
 
         log(f"Thinking... (step {iteration + 1})")
@@ -1576,6 +1704,8 @@ async def process_turn(
         # Execute tools — show camera tool calls prominently
         tool_results = []
         for tc in tool_calls:
+            if _cancel_requested.is_set():
+                return "Cancelled."
             fn = tc.get("function", {})
             name = fn.get("name", "")
             args = fn.get("arguments", {})
@@ -1596,7 +1726,12 @@ async def process_turn(
 
                 traceback.print_exc()  # goes to log file, not terminal
                 result = f"error: {type(e).__name__}: {e}"
-            log(f"  ✓ {result}")
+            marker = "✓"
+            if result.startswith(("safety governor:", "cancelled:")) or "→ cancelled" in result:
+                marker = "✗"
+            elif "safety governor:" in result:
+                marker = "⚠"
+            log(f"  {marker} {result}")
             tool_results.append({"tool": name, "result": result})
 
         # Ollama ignores images on role:tool messages — vision only works on role:user.
@@ -2030,6 +2165,7 @@ class Go2App(App):
         self._recording = False
         self._context_fetching = False
         self._last_context_fetch_ts = 0.0
+        self._turn_future = None
 
     def compose(self) -> ComposeResult:
         # Top status bar
@@ -2224,6 +2360,7 @@ class Go2App(App):
         Spins up its own event loop to drive the async robot/Ollama code."""
         import asyncio as _asyncio
 
+        _cancel_requested.clear()
         self.call_from_thread(self._set_processing, True)
 
         def log_progress(msg):
@@ -2255,6 +2392,7 @@ class Go2App(App):
             ),
             _main_loop,
         )
+        self._turn_future = future
         try:
             response = future.result(timeout=300)
             if response:
@@ -2279,11 +2417,14 @@ class Go2App(App):
             self.call_from_thread(
                 self.log_chat, f"[bold red]TIMEOUT:[/bold red] {escape(str(e))}"
             )
+        except _cf.CancelledError:
+            self.call_from_thread(self.log_chat, "[dim]Go2: cancelled.[/dim]")
         except Exception as e:
             self.call_from_thread(
                 self.log_chat, f"[bold red]ERROR:[/bold red] {escape(str(e))}"
             )
         finally:
+            self._turn_future = None
             self.call_from_thread(self._set_processing, False)
 
     # ── Mic / voice input ────────────────────────────────────────────────────
@@ -2349,6 +2490,13 @@ class Go2App(App):
         else:
             self._run_turn(text)
 
+    def _cancel_active_turn(self) -> None:
+        _cancel_requested.set()
+        self._queue.clear()
+        future = self._turn_future
+        if future is not None and not future.done():
+            future.cancel()
+
     _THINK_FRAMES = ["⏳ Thinking", "⏳ Thinking.", "⏳ Thinking..", "⏳ Thinking..."]
 
     def _set_processing(self, value: bool) -> None:
@@ -2375,10 +2523,13 @@ class Go2App(App):
         return "● Mock Go2" if self.args.mock else "● Go2 Connected"
 
     async def action_quit(self) -> None:
+        self._cancel_active_turn()
         self.log_chat("[dim]Stopping robot...[/dim]")
         try:
             await _mcf("StopMove")
+            await _mcf("Move", {"x": 0, "y": 0, "z": 0})
             await _mcf("BalanceStand")
+            await _stop_radio()
         except Exception:
             pass
         self.exit()
@@ -2471,11 +2622,21 @@ Examples:
     )
     p.add_argument("--no-camera", action="store_true")
     p.add_argument("--quality", default=75, type=int, help="JPEG quality 1-100")
+    p.add_argument("--max-step", default=1.0, type=float, help="Safety governor max move distance per tool call, metres")
+    p.add_argument("--max-turn", default=720.0, type=float, help="Safety governor max turn per tool call, degrees")
+    p.add_argument("--allow-acrobatics", action="store_true", help="Allow flips, jumps, pounces, and handstands")
     args = p.parse_args()
 
     if not args.mock and not args.ip and not args.serial and not args.remote:
         args.ip = "10.0.0.200"
     args.ollama = _normalize_ollama_url(args.ollama)
+    _safety_config.update(
+        {
+            "max_step_m": max(0.1, float(args.max_step)),
+            "max_turn_deg": max(5.0, float(args.max_turn)),
+            "allow_acrobatics": bool(args.allow_acrobatics),
+        }
+    )
 
     global _main_loop, _IMAGE_PROTOCOL
     _main_loop = asyncio.get_event_loop()
@@ -2489,7 +2650,16 @@ Examples:
     await connect(args)
 
     app = Go2App(args)
-    await app.run_async()
+    try:
+        await app.run_async()
+    finally:
+        _cancel_requested.set()
+        try:
+            await _mcf("StopMove")
+            await _mcf("Move", {"x": 0, "y": 0, "z": 0})
+            await _stop_radio()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

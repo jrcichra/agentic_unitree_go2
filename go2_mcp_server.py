@@ -121,6 +121,127 @@ _video_track = None  # aiortc VideoStreamTrack from the robot
 _audio_player = None
 _tts_temp_file: str | None = None
 
+_safety_config = {
+    "max_step_m": 1.0,
+    "max_turn_rad": 12.566370614359172,
+    "allow_acrobatics": False,
+    "obstacle_stop_m": 0.35,
+}
+
+_HIGH_RISK_TOOLS = {
+    "flip",
+    "handstand",
+    "front_jump",
+    "front_pounce",
+    "moon_walk",
+    "one_sided_step",
+    "bound",
+}
+
+
+def _as_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _robot_is_fallen() -> bool:
+    rpy = _latest_sport_state.get("imu_state", {}).get("rpy", [0, 0, 0])
+    if not isinstance(rpy, list) or len(rpy) < 2:
+        return False
+    return abs(_as_float(rpy[0])) > 0.5 or abs(_as_float(rpy[1])) > 0.5
+
+
+def _forward_obstacle_m() -> float:
+    ranges = _latest_sport_state.get("range_obstacle", [0, 0, 0, 0])
+    if isinstance(ranges, list) and ranges:
+        return _as_float(ranges[0])
+    return 0.0
+
+
+def _motion_blocked_by_state(name: str) -> str | None:
+    recovery_tools = {
+        "stop",
+        "recovery_stand",
+        "stand_down",
+        "damp",
+        "get_sport_state",
+        "get_low_state",
+        "get_robot_state",
+    }
+    if _robot_is_fallen() and name not in recovery_tools:
+        return "safety governor: robot appears fallen; use recovery_stand first"
+    return None
+
+
+def _govern_tool(name: str, args: dict) -> tuple[bool, dict, str | None]:
+    args = dict(args or {})
+    motion_tools = {
+        "move",
+        "set_gait",
+        "lead_follow",
+        "set_body_height",
+        "set_foot_raise_height",
+        "set_speed_level",
+        "set_euler",
+        "hello",
+        "show_heart",
+        "stretch",
+        "scrape",
+        "wallow",
+        "dance",
+        "flip",
+        "handstand",
+        "front_jump",
+        "front_pounce",
+        "wiggle_hips",
+        "finger_heart",
+        "moon_walk",
+        "one_sided_step",
+        "bound",
+    }
+    if name in motion_tools:
+        blocked = _motion_blocked_by_state(name)
+        if blocked:
+            return False, args, blocked
+
+    if name == "move":
+        max_step = float(_safety_config["max_step_m"])
+        max_turn = float(_safety_config["max_turn_rad"])
+        clamped = False
+        for key, limit in (("x", max_step), ("y", max_step), ("z", max_turn)):
+            old_value = _as_float(args.get(key, 0))
+            args[key] = max(-limit, min(limit, old_value))
+            clamped = clamped or args[key] != old_value
+        if args["x"] > 0:
+            dist = _forward_obstacle_m()
+            if 0 < dist < float(_safety_config["obstacle_stop_m"]):
+                return False, args, f"safety governor: forward obstacle at {dist:.2f}m"
+        if clamped:
+            return True, args, f"safety governor: move clamped to x={args['x']:.2f}, y={args['y']:.2f}, z={args['z']:.2f}"
+        return True, args, None
+
+    if name in _HIGH_RISK_TOOLS and not _safety_config["allow_acrobatics"]:
+        return False, args, f"safety governor: {name} is disabled; restart with --allow-acrobatics to enable it"
+
+    if name == "set_euler":
+        for key in ("roll", "pitch", "yaw"):
+            args[key] = max(-0.35, min(0.35, _as_float(args.get(key, 0))))
+    elif name == "set_body_height":
+        args["height"] = max(-0.12, min(0.12, _as_float(args.get("height", 0))))
+    elif name == "set_foot_raise_height":
+        args["height"] = max(0.0, min(0.12, _as_float(args.get("height", 0.08))))
+    elif name == "set_speed_level":
+        args["level"] = max(0, min(1, int(_as_float(args.get("level", 1), 1))))
+    elif name == "set_volume":
+        args["volume"] = max(0, min(10, int(_as_float(args.get("volume", 5), 5))))
+    elif name == "set_brightness":
+        args["brightness"] = max(0, min(10, int(_as_float(args.get("brightness", 5), 5))))
+    elif name == "set_led_color":
+        args["duration"] = max(1, min(30, int(_as_float(args.get("duration", 3), 3))))
+    return True, args, None
+
 
 def _mock_status(code: int = 0, data=None) -> dict:
     return {
@@ -934,7 +1055,13 @@ async def call_tool(
 ) -> list[types.TextContent | types.ImageContent]:
     conn = await get_conn()
     try:
-        result = await _dispatch(conn, name, arguments)
+        allowed, arguments, note = _govern_tool(name, arguments)
+        if not allowed:
+            result = {"status": "blocked", "message": note}
+        else:
+            result = await _dispatch(conn, name, arguments)
+            if note and isinstance(result, dict):
+                result["safety_note"] = note
     except Exception as e:
         result = {"error": str(e)}
 
@@ -1564,8 +1691,16 @@ async def run_http(args: argparse.Namespace) -> None:
         starlette_app, host=args.host, port=args.port, log_level="warning"
     )
     userver = uvicorn.Server(config)
-    async with session_manager.run():
-        await userver.serve()
+    try:
+        async with session_manager.run():
+            await userver.serve()
+    finally:
+        try:
+            await _mcf(_conn, "StopMove")
+            await _mcf(_conn, "Move", {"x": 0, "y": 0, "z": 0})
+            await _stop_audio(_conn)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -1579,10 +1714,18 @@ async def run_stdio(args: argparse.Namespace) -> None:
     _setup_state_subscriptions(_conn)
     await _setup_video_track(_conn)
     print("[go2-mcp] Running in stdio mode.", file=sys.stderr)
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream, write_stream, server.create_initialization_options()
-        )
+    try:
+        async with stdio_server() as (read_stream, write_stream):
+            await server.run(
+                read_stream, write_stream, server.create_initialization_options()
+            )
+    finally:
+        try:
+            await _mcf(_conn, "StopMove")
+            await _mcf(_conn, "Move", {"x": 0, "y": 0, "z": 0})
+            await _stop_audio(_conn)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -1601,11 +1744,21 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", default=8000, type=int)
     p.add_argument("--stdio", action="store_true", help="Use stdio instead of HTTP")
+    p.add_argument("--max-step", default=1.0, type=float, help="Safety governor max move displacement per call, metres")
+    p.add_argument("--max-turn", default=720.0, type=float, help="Safety governor max yaw per move call, degrees")
+    p.add_argument("--allow-acrobatics", action="store_true", help="Allow flips, jumps, pounces, handstands, and other high-risk moves")
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
+    _safety_config.update(
+        {
+            "max_step_m": max(0.1, float(args.max_step)),
+            "max_turn_rad": max(5.0, float(args.max_turn)) * 3.141592653589793 / 180.0,
+            "allow_acrobatics": bool(args.allow_acrobatics),
+        }
+    )
     try:
         asyncio.run(run_stdio(args) if args.stdio else run_http(args))
     except KeyboardInterrupt:
