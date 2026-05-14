@@ -1470,7 +1470,7 @@ async def run_tool(name: str, args: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Ollama — fixed streaming + conversation history management
+# LLM providers — streaming + conversation history management
 # ---------------------------------------------------------------------------
 
 MAX_HISTORY_TURNS = 20  # keep last N user/assistant pairs to prevent context overflow
@@ -1676,6 +1676,15 @@ def _fetch_context_size(model: str, ollama_url: str, timeout: float = 2.0) -> in
     return 0
 
 
+def _normalize_base_url(url: str | None, default: str) -> str:
+    url = (url or default).strip()
+    if not url:
+        url = default
+    if not url.startswith(("http://", "https://")):
+        url = "http://" + url
+    return url.rstrip("/")
+
+
 def _normalize_ollama_url(url: str) -> str:
     """Accept bare hosts like 10.0.0.43 and normalize to Ollama's HTTP base URL."""
     url = (url or "").strip()
@@ -1690,6 +1699,105 @@ def _normalize_ollama_url(url: str) -> str:
             rest = host_port + ":11434" + ("/" + rest.split("/", 1)[1] if "/" in rest else "")
         url = scheme + "://" + rest
     return url.rstrip("/")
+
+
+def _normalize_openai_base_url(url: str | None) -> str:
+    return _normalize_base_url(url, "https://api.openai.com/v1")
+
+
+def _normalize_anthropic_base_url(url: str | None) -> str:
+    return _normalize_base_url(url, "https://api.anthropic.com")
+
+
+def _provider_base_url(provider: str, base_url: str | None, ollama_url: str) -> str:
+    provider = provider.lower()
+    if provider == "ollama":
+        return _normalize_ollama_url(ollama_url)
+    if provider == "openai":
+        return _normalize_openai_base_url(base_url or "https://api.openai.com/v1")
+    if provider == "openrouter":
+        return _normalize_openai_base_url(base_url or "https://openrouter.ai/api/v1")
+    if provider == "ollama-openai":
+        return _normalize_openai_base_url(base_url or f"{_normalize_ollama_url(ollama_url)}/v1")
+    if provider == "lmstudio":
+        return _normalize_openai_base_url(base_url or "http://localhost:1234/v1")
+    if provider == "openai-compatible":
+        return _normalize_openai_base_url(base_url)
+    if provider in {"anthropic", "anthropic-compatible"}:
+        return _normalize_anthropic_base_url(base_url)
+    raise ValueError(f"Unknown provider: {provider}")
+
+
+def _provider_api_key(provider: str, api_key: str | None) -> str | None:
+    if api_key:
+        return api_key
+    provider = provider.lower()
+    env_by_provider = {
+        "openai": "OPENAI_API_KEY",
+        "openrouter": "OPENROUTER_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "anthropic-compatible": "ANTHROPIC_API_KEY",
+    }
+    env_name = env_by_provider.get(provider)
+    if env_name:
+        return os.environ.get(env_name)
+    if provider == "openai-compatible":
+        return os.environ.get("OPENAI_API_KEY") or "local"
+    if provider in {"ollama-openai", "lmstudio"}:
+        return "local"
+    return None
+
+
+def _openai_content_from_message(message: dict) -> str | list[dict]:
+    content = str(message.get("content", ""))
+    images = message.get("images") or []
+    if not images:
+        return content
+    parts: list[dict] = []
+    if content:
+        parts.append({"type": "text", "text": content})
+    for image_b64 in images:
+        parts.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
+            }
+        )
+    return parts
+
+
+def _messages_to_openai(messages: list[dict]) -> list[dict]:
+    converted: list[dict] = []
+    for message in messages:
+        role = message.get("role")
+        if role == "system":
+            converted.append({"role": "system", "content": str(message.get("content", ""))})
+        elif role == "user":
+            converted.append({"role": "user", "content": _openai_content_from_message(message)})
+        elif role == "assistant":
+            content = str(message.get("content", ""))
+            if content:
+                converted.append({"role": "assistant", "content": content})
+        elif role == "tool":
+            converted.append({"role": "user", "content": f"[Tool results] {message.get('content', '')}"})
+    return converted
+
+
+def _tool_calls_from_openai(tool_calls: list[dict]) -> list[dict]:
+    converted = []
+    for i, tc in enumerate(tool_calls):
+        fn = tc.get("function", {})
+        converted.append(
+            {
+                "id": tc.get("id") or f"call_{i}",
+                "type": "function",
+                "function": {
+                    "name": fn.get("name", ""),
+                    "arguments": fn.get("arguments") or "{}",
+                },
+            }
+        )
+    return converted
 
 
 def _ollama_chat(
@@ -1785,6 +1893,287 @@ def _ollama_chat(
     }
 
 
+def _openai_compatible_chat(
+    messages: list[dict],
+    model: str,
+    base_url: str,
+    api_key: str | None,
+    token_fn=None,
+) -> dict:
+    if not api_key:
+        raise ConnectionError("Missing API key. Set OPENAI_API_KEY or pass --api-key.")
+
+    payload = {
+        "model": model,
+        "messages": _messages_to_openai(messages),
+        "stream": True,
+        "temperature": 0.2,
+        "tools": TOOLS,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        resp = requests.post(
+            f"{base_url.rstrip('/')}/chat/completions",
+            json=payload,
+            headers=headers,
+            stream=True,
+            timeout=120,
+        )
+        resp.raise_for_status()
+    except requests.exceptions.ConnectionError as e:
+        raise ConnectionError(f"Cannot reach provider at {base_url}: {e}") from e
+    except requests.exceptions.Timeout as e:
+        raise TimeoutError("Provider request timed out after 120s") from e
+
+    content_parts: list[str] = []
+    tool_call_chunks: dict[int, dict] = {}
+    prompt_tokens = 0
+
+    for raw in resp.iter_lines(decode_unicode=True):
+        if not raw:
+            continue
+        line = raw.strip()
+        if line.startswith("data:"):
+            line = line[5:].strip()
+        if line == "[DONE]":
+            break
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        usage = data.get("usage") or {}
+        prompt_tokens = usage.get("prompt_tokens") or prompt_tokens
+        choices = data.get("choices") or []
+        if not choices:
+            continue
+        delta = choices[0].get("delta") or {}
+        chunk = delta.get("content")
+        if chunk:
+            content_parts.append(chunk)
+            if token_fn:
+                token_fn(("content", chunk))
+        for tc in delta.get("tool_calls") or []:
+            index = int(tc.get("index", 0))
+            current = tool_call_chunks.setdefault(
+                index,
+                {
+                    "id": "",
+                    "type": "function",
+                    "function": {"name": "", "arguments": ""},
+                },
+            )
+            if tc.get("id"):
+                current["id"] = tc["id"]
+            if tc.get("type"):
+                current["type"] = tc["type"]
+            fn = tc.get("function") or {}
+            if fn.get("name"):
+                current["function"]["name"] += fn["name"]
+            if fn.get("arguments"):
+                current["function"]["arguments"] += fn["arguments"]
+
+    global _last_prompt_tokens
+    if prompt_tokens:
+        _last_prompt_tokens = prompt_tokens
+
+    return {
+        "role": "assistant",
+        "content": "".join(content_parts),
+        "thinking": "",
+        "tool_calls": _tool_calls_from_openai(
+            [tool_call_chunks[i] for i in sorted(tool_call_chunks)]
+        ),
+    }
+
+
+def _anthropic_content_from_message(message: dict) -> list[dict]:
+    parts = []
+    content = str(message.get("content", ""))
+    if content:
+        parts.append({"type": "text", "text": content})
+    for image_b64 in message.get("images") or []:
+        parts.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": image_b64,
+                },
+            }
+        )
+    return parts or [{"type": "text", "text": ""}]
+
+
+def _messages_to_anthropic(messages: list[dict]) -> tuple[str, list[dict]]:
+    system_parts = []
+    converted: list[dict] = []
+    for message in messages:
+        role = message.get("role")
+        if role == "system":
+            system_parts.append(str(message.get("content", "")))
+        elif role == "user":
+            converted.append({"role": "user", "content": _anthropic_content_from_message(message)})
+        elif role == "assistant":
+            content_blocks = []
+            text = str(message.get("content", ""))
+            if text:
+                content_blocks.append({"type": "text", "text": text})
+            if content_blocks:
+                converted.append({"role": "assistant", "content": content_blocks})
+        elif role == "tool":
+            converted.append({"role": "user", "content": [{"type": "text", "text": f"[Tool results] {message.get('content', '')}"}]})
+    return "\n\n".join(system_parts), converted
+
+
+def _tools_to_anthropic() -> list[dict]:
+    tools = []
+    for tool in TOOLS:
+        fn = tool.get("function", {})
+        tools.append(
+            {
+                "name": fn.get("name", ""),
+                "description": fn.get("description", ""),
+                "input_schema": fn.get("parameters", {"type": "object", "properties": {}}),
+            }
+        )
+    return tools
+
+
+def _anthropic_chat(
+    messages: list[dict],
+    model: str,
+    base_url: str,
+    api_key: str | None,
+    token_fn=None,
+) -> dict:
+    global _last_prompt_tokens
+
+    if not api_key:
+        raise ConnectionError("Missing API key. Set ANTHROPIC_API_KEY or pass --api-key.")
+
+    system, anthropic_messages = _messages_to_anthropic(messages)
+    payload = {
+        "model": model,
+        "max_tokens": 2048,
+        "temperature": 0.2,
+        "system": system,
+        "messages": anthropic_messages,
+        "tools": _tools_to_anthropic(),
+        "stream": True,
+    }
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        resp = requests.post(
+            f"{base_url.rstrip('/')}/v1/messages",
+            json=payload,
+            headers=headers,
+            stream=True,
+            timeout=120,
+        )
+        resp.raise_for_status()
+    except requests.exceptions.ConnectionError as e:
+        raise ConnectionError(f"Cannot reach Anthropic at {base_url}: {e}") from e
+    except requests.exceptions.Timeout as e:
+        raise TimeoutError("Anthropic request timed out after 120s") from e
+
+    content_parts: list[str] = []
+    tool_blocks: dict[int, dict] = {}
+    current_index: int | None = None
+    prompt_tokens = 0
+
+    for raw in resp.iter_lines(decode_unicode=True):
+        if not raw:
+            continue
+        line = raw.strip()
+        if not line.startswith("data:"):
+            continue
+        try:
+            data = json.loads(line[5:].strip())
+        except json.JSONDecodeError:
+            continue
+
+        event_type = data.get("type")
+        if event_type == "message_start":
+            usage = (data.get("message") or {}).get("usage") or {}
+            prompt_tokens = usage.get("input_tokens") or prompt_tokens
+        elif event_type == "content_block_start":
+            current_index = int(data.get("index", 0))
+            block = data.get("content_block") or {}
+            if block.get("type") == "tool_use":
+                tool_blocks[current_index] = {
+                    "id": block.get("id", f"tool_{current_index}"),
+                    "name": block.get("name", ""),
+                    "arguments": "",
+                }
+        elif event_type == "content_block_delta":
+            delta_index = int(data.get("index", current_index or 0))
+            delta = data.get("delta") or {}
+            if delta.get("type") == "text_delta":
+                text = delta.get("text", "")
+                if text:
+                    content_parts.append(text)
+                    if token_fn:
+                        token_fn(("content", text))
+            elif delta.get("type") == "input_json_delta" and delta_index in tool_blocks:
+                tool_blocks[delta_index]["arguments"] += delta.get("partial_json", "")
+        elif event_type == "message_delta":
+            usage = data.get("usage") or {}
+            prompt_tokens = usage.get("input_tokens") or prompt_tokens
+
+    if prompt_tokens:
+        _last_prompt_tokens = prompt_tokens
+
+    tool_calls = []
+    for index in sorted(tool_blocks):
+        block = tool_blocks[index]
+        tool_calls.append(
+            {
+                "id": block["id"],
+                "type": "function",
+                "function": {
+                    "name": block["name"],
+                    "arguments": block["arguments"] or "{}",
+                },
+            }
+        )
+
+    return {
+        "role": "assistant",
+        "content": "".join(content_parts),
+        "thinking": "",
+        "tool_calls": tool_calls,
+    }
+
+
+def _llm_chat(
+    messages: list[dict],
+    provider: str,
+    model: str,
+    base_url: str,
+    api_key: str | None,
+    token_fn=None,
+) -> dict:
+    provider = provider.lower()
+    if provider == "ollama":
+        return _ollama_chat(messages, model, base_url, token_fn=token_fn)
+    if provider in {"openai-compatible", "openai", "openrouter", "ollama-openai", "lmstudio"}:
+        return _openai_compatible_chat(messages, model, base_url, api_key, token_fn=token_fn)
+    if provider in {"anthropic", "anthropic-compatible"}:
+        return _anthropic_chat(messages, model, base_url, api_key, token_fn=token_fn)
+    raise ValueError(f"Unknown provider: {provider}")
+
+
 def _trim_history(history: list[dict]) -> list[dict]:
     """
     Keep system prompt + last MAX_HISTORY_TURNS user/assistant/tool turns.
@@ -1824,8 +2213,10 @@ def _trim_history(history: list[dict]) -> list[dict]:
 async def process_turn(
     user_input: str,
     history: list[dict],
+    provider: str,
     model: str,
-    ollama_url: str,
+    base_url: str,
+    api_key: str | None,
     use_camera: bool,
     cam_quality: int,
     log_fn=None,  # callback(str) for progress updates
@@ -1866,7 +2257,7 @@ async def process_turn(
         try:
             loop = asyncio.get_event_loop()
             assistant_msg = await loop.run_in_executor(
-                None, lambda: _ollama_chat(trimmed, model, ollama_url)
+                None, lambda: _llm_chat(trimmed, provider, model, base_url, api_key)
             )
         except (ConnectionError, TimeoutError) as e:
             history.pop()  # remove user msg so we don't corrupt history
@@ -2303,7 +2694,7 @@ BUILT-IN TEXT COMMANDS
   /resume <id>    Switch to a saved chat session
   /rename <id> <title>
                   Rename a saved chat session
-  /model <name>   Switch Ollama model (e.g. /model llava)
+  /model <name>   Switch model (e.g. /model llava)
   /help           Open this help screen
   /prompt         Show current system prompt
 """
@@ -2335,7 +2726,7 @@ SLASH_COMMANDS = [
     {
         "name": "/model",
         "usage": "/model <name>",
-        "description": "Switch Ollama model",
+        "description": "Switch model",
     },
     {
         "name": "/state",
@@ -2417,8 +2808,10 @@ class Go2App(App):
     def __init__(self, args: argparse.Namespace):
         super().__init__()
         self.args = args
+        self.provider = args.provider
         self.model = args.model
-        self.ollama_url = _normalize_ollama_url(args.ollama)
+        self.base_url = args.base_url
+        self.api_key = args.api_key
         self.use_camera = not args.no_camera
         self.history: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
         self.session_store = SessionStore(Path(args.sessions_db).expanduser())
@@ -2495,8 +2888,9 @@ class Go2App(App):
         _err_capture._app = self  # wire up error capture to this app instance
         self.log_chat(
             "[bold cyan]Go2 CLI[/bold cyan] ready. "
+            f"Provider: [yellow]{self.provider}[/yellow]  "
             f"Model: [yellow]{self.model}[/yellow]  "
-            f"Ollama: [dim]{self.ollama_url}[/dim]  "
+            f"Base URL: [dim]{self.base_url}[/dim]  "
             f"Mode: [yellow]{'mock' if self.args.mock else 'robot'}[/yellow]  "
             f"Session: [yellow]{self.session_id}[/yellow]"
         )
@@ -2553,7 +2947,10 @@ class Go2App(App):
     def _fetch_context_size_background(self) -> None:
         global _context_size
         try:
-            size = _fetch_context_size(self.model, self.ollama_url, timeout=1.5)
+            if self.provider != "ollama":
+                size = 0
+            else:
+                size = _fetch_context_size(self.model, self.base_url, timeout=1.5)
             if size > 0:
                 _context_size = size
         finally:
@@ -2816,7 +3213,7 @@ class Go2App(App):
                 )
 
         # Robot coroutines must run on the main loop (where WebRTC lives).
-        # Ollama HTTP is synchronous (requests), so process_turn is safe to
+        # Provider HTTP is synchronous (requests), so process_turn is safe to
         # drive from a thread as long as robot tool calls are dispatched via
         # run_coroutine_threadsafe back to the main loop.
         import concurrent.futures as _cf
@@ -2825,8 +3222,10 @@ class Go2App(App):
             process_turn(
                 user_input=user_input,
                 history=self.history,
+                provider=self.provider,
                 model=self.model,
-                ollama_url=self.ollama_url,
+                base_url=self.base_url,
+                api_key=self.api_key,
                 use_camera=self.use_camera,
                 cam_quality=self.args.quality,
                 log_fn=log_progress,
@@ -2850,7 +3249,7 @@ class Go2App(App):
                 self.log_chat, f"[bold red]ERROR:[/bold red] {escape(str(e))}"
             )
             self.call_from_thread(
-                self.log_chat, "[dim]Is Ollama running? Try: ollama serve[/dim]"
+                self.log_chat, "[dim]Check provider base URL and API key.[/dim]"
             )
             if self.history and self.history[-1].get("role") == "user":
                 self.history.pop()
@@ -3052,6 +3451,8 @@ Examples:
   uv run cli.py --mock -c
   uv run cli.py --ip 10.0.0.200
   uv run cli.py --ip 10.0.0.200 --model llava
+  uv run cli.py --provider openai --model gpt-4.1
+  uv run cli.py --provider anthropic --model claude-sonnet-4-5
   uv run cli.py --ip 10.0.0.200 --no-camera
         """,
     )
@@ -3063,9 +3464,34 @@ Examples:
     p.add_argument("--password", default=None)
     p.add_argument("--model", default="qwen3.6:27b")
     p.add_argument(
+        "--provider",
+        default="ollama",
+        choices=[
+            "ollama",
+            "openai-compatible",
+            "openai",
+            "openrouter",
+            "ollama-openai",
+            "lmstudio",
+            "anthropic",
+            "anthropic-compatible",
+        ],
+        help="LLM provider. openai-compatible also works with OpenAI-compatible local/hosted APIs.",
+    )
+    p.add_argument(
+        "--base-url",
+        default=None,
+        help="Provider base URL for compatible/local providers.",
+    )
+    p.add_argument(
+        "--api-key",
+        default=None,
+        help="Provider API key. Defaults to OPENAI_API_KEY, OPENROUTER_API_KEY, or ANTHROPIC_API_KEY where applicable.",
+    )
+    p.add_argument(
         "--ollama",
         default="http://localhost:11434",
-        help="Ollama base URL or host. Examples: http://localhost:11434, 10.0.0.43, 10.0.0.43:11434",
+        help="Ollama base URL or host for --provider ollama/ollama-openai. Examples: http://localhost:11434, 10.0.0.43",
     )
     p.add_argument("--no-camera", action="store_true")
     p.add_argument("--quality", default=75, type=int, help="JPEG quality 1-100")
@@ -3090,6 +3516,8 @@ Examples:
     if not args.mock and not args.ip and not args.serial and not args.remote:
         args.ip = "10.0.0.200"
     args.ollama = _normalize_ollama_url(args.ollama)
+    args.base_url = _provider_base_url(args.provider, args.base_url, args.ollama)
+    args.api_key = _provider_api_key(args.provider, args.api_key)
     _safety_config.update(
         {
             "max_step_m": max(0.1, float(args.max_step)),

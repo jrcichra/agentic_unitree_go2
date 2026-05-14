@@ -24,7 +24,7 @@ Install dependencies:
 uv sync
 ```
 
-**Option A — Natural Language TUI** (standalone, talks to robot + Ollama directly):
+**Option A — Natural Language TUI** (standalone, talks to robot + an LLM provider):
 ```bash
 uv run cli.py --ip 10.0.0.200 --model qwen3.5:35b
 ```
@@ -85,10 +85,21 @@ A full-screen terminal UI for conversational robot control with embedded camera 
 
 ```bash
 uv run cli.py --ip 10.0.0.200 --model qwen3.5:35b
+uv run cli.py --provider openai --model gpt-4.1
+uv run cli.py --provider anthropic --model claude-sonnet-4-5
 uv run cli.py --no-camera  # for headless operation
 uv run cli.py --mock       # offline development
 uv run cli.py -c           # continue the most recent saved chat session
 ```
+
+**LLM providers:**
+- `ollama` (default): native Ollama `/api/chat`, configured with `--ollama`
+- `openai-compatible`: any OpenAI-compatible endpoint, configured with `--base-url` and `--api-key`
+- `openai`: preset for `https://api.openai.com/v1`, reads `OPENAI_API_KEY`
+- `openrouter`: preset for `https://openrouter.ai/api/v1`, reads `OPENROUTER_API_KEY`
+- `ollama-openai`: Ollama's OpenAI-compatible `/v1` endpoint
+- `lmstudio`: preset for `http://localhost:1234/v1`
+- `anthropic` / `anthropic-compatible`: Anthropic Messages API, reads `ANTHROPIC_API_KEY`
 
 **Features:**
 - **Live camera feed**: iTerm2/Kitty inline images (Alacritty, WezTerm, iTerm2) or half-block ASCII art fallback
@@ -97,7 +108,8 @@ uv run cli.py -c           # continue the most recent saved chat session
 - **Natural language**: "walk forward 1 metre", "turn left 90°", "find the red chair", "do a front flip"
 - **Full-state telemetry**: Position, velocity, battery %, orientation (RPY), gait type, LiDAR obstacle distances
 - **Autonomous tool calling**: move, turn, stance poses, tricks (flips, dances, waves), LED control, speed adjustment
-- **Multi-model support**: Switch between any Ollama model on the fly (`model qwen3.5:35b`)
+- **Multi-provider support**: Ollama, OpenAI-compatible APIs, OpenRouter, LM Studio, and Anthropic
+- **Multi-model support**: Switch model names on the fly (`model qwen3.5:35b`)
 - **Voice/audio**: `Ctrl+M` records from the Go2 microphone, `play_radio` streams audio, `say(text)` speaks via local TTS
 - **Mock mode**: Simulated WebRTC, telemetry, camera frames, motion, volume, audio, and speech without powering on the robot
 - **Conversation history**: Scrollable chat with rich markup highlighting
@@ -121,7 +133,7 @@ uv run cli.py -c           # continue the most recent saved chat session
 - `/new` — Start a fresh chat session
 - `/resume <id>` — Switch to a saved chat session
 - `/rename <id> <title>` — Rename a saved chat session
-- `/model <name>` — Switch Ollama model on the fly
+- `/model <name>` — Switch model on the fly
 - `/help` — Show help
 - `/prompt` — Show the system prompt
 
@@ -155,7 +167,7 @@ uv run cli.py -c           # continue the most recent saved chat session
 - **Camera**: VideoTrack streamed via WebRTC, converted to JPEG for display
 - **MCP Server**: Implements MCP protocol (list_tools, call_tool, capabilities) for LLM integration
 - **TUI**: Textual framework with inline image rendering via terminal escape sequences
-- **LLM**: Ollama with configurable model (Qwen3, DeepSeek-R1, LLaVA, etc.)
+- **LLM**: Ollama, OpenAI-compatible APIs, and Anthropic with configurable models
 - **Shared**: Error handler patch fixes broken unpacking in unitree_webrtc_connect library
 
 ---
