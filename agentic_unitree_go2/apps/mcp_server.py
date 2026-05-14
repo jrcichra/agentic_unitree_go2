@@ -1,5 +1,5 @@
 """
-Unitree Go2 WebRTC MCP Server — Streamable HTTP + stdio transport
+go2-mcp — Unitree Go2 WebRTC MCP Server with Streamable HTTP + stdio transport
 
 Install (venv + requirements.txt):
     python -m venv venv
@@ -7,11 +7,11 @@ Install (venv + requirements.txt):
     pip install -r requirements.txt
 
 Run (HTTP — OpenWebUI):
-    python go2_mcp_server.py
-    python go2_mcp_server.py --ip 10.0.0.200 --port 8000
+    uv run go2-mcp
+    uv run go2-mcp --ip 10.0.0.200 --port 8000
 
 Run (stdio — Claude Desktop):
-    python go2_mcp_server.py --stdio
+    uv run go2-mcp --stdio
 
 OpenWebUI:
     Admin Panel -> Settings -> Tools -> Add Connection

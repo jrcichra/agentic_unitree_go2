@@ -143,7 +143,7 @@ uv run go2-tui -c           # continue the most recent saved chat session
 
 | Mode | How to Connect | Command Flag |
 |------|----------------|--------------|
-| **Local AP** (default) | Robot's built-in Wi-Fi | `python script.py` |
+| **Local AP** (default) | Robot's built-in Wi-Fi | `uv run go2-tui` or `uv run go2-mcp` |
 | **Local STA** | Connect to robot as station | `--ip 10.0.0.200` or `--serial <SN>` |
 | **Remote** | Via Unitree cloud | `--remote --serial <SN> --username <user> --password <pass>` |
 | **MCF** (firmware 1.1.7+) | Unified mode — all commands work directly | Automatic |
@@ -163,7 +163,7 @@ uv run go2-tui -c           # continue the most recent saved chat session
 
 ## Architecture
 
-- **Package layout**: Runtime code lives under `agentic_unitree_go2/`; root `cli.py` and `go2_mcp_server.py` remain as compatibility wrappers
+- **Package layout**: Runtime code lives under `agentic_unitree_go2/`; `go2-tui` and `go2-mcp` are the canonical entrypoints
 - **Entrypoints**: `go2-tui` launches the Textual app, `go2-mcp` launches HTTP or stdio MCP transport
 - **Communication**: WebRTC via `unitree_webrtc_connect` library
 - **Shared robot layer**: Connection selection, mock robot, and safety governor are reusable package modules

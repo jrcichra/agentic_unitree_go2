@@ -1,5 +1,5 @@
 """
-go2_cli.py — Natural language TUI for the Unitree Go2
+go2-tui — Natural language TUI for the Unitree Go2
 
 A full-screen terminal UI where you type commands in plain English:
   - Top-right: live camera feed (sixel/kitty/unicode block art)
@@ -10,9 +10,9 @@ Install:
     uv sync
 
 Run:
-    uv run cli.py --ip 10.0.0.200
-    uv run cli.py --ip 10.0.0.200 --model llava
-    uv run cli.py --ip 10.0.0.200 --no-camera
+    uv run go2-tui --ip 10.0.0.200
+    uv run go2-tui --ip 10.0.0.200 --model llava
+    uv run go2-tui --ip 10.0.0.200 --no-camera
 """
 
 import asyncio
