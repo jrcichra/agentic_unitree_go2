@@ -87,6 +87,7 @@ A full-screen terminal UI for conversational robot control with embedded camera 
 uv run cli.py --ip 10.0.0.200 --model qwen3.5:35b
 uv run cli.py --no-camera  # for headless operation
 uv run cli.py --mock       # offline development
+uv run cli.py -c           # continue the most recent saved chat session
 ```
 
 **Features:**
@@ -100,6 +101,8 @@ uv run cli.py --mock       # offline development
 - **Voice/audio**: `Ctrl+M` records from the Go2 microphone, `play_radio` streams audio, `say(text)` speaks via local TTS
 - **Mock mode**: Simulated WebRTC, telemetry, camera frames, motion, volume, audio, and speech without powering on the robot
 - **Conversation history**: Scrollable chat with rich markup highlighting
+- **Slash commands**: Type `/` for command previews like `/sessions`, `/new`, `/resume <id>`, `/model <name>`
+- **Saved sessions**: SQLite-backed chat history with `/sessions`, `/new`, `/resume <id>`, and `/rename <id> <title>`
 - **Error panel**: Toggleable view for debugging connection/command issues
 
 **Keyboard shortcuts:**
@@ -112,9 +115,15 @@ uv run cli.py --mock       # offline development
 - `Ctrl+C` — Quit (safely stops robot first)
 
 **Built-in text commands:**
-- `state` — Print robot state JSON
-- `clear` — Clear conversation
-- `model <name>` — Switch Ollama model on the fly
+- `/state` — Print robot state JSON
+- `/clear` — Clear conversation
+- `/sessions` — List recent saved chat sessions
+- `/new` — Start a fresh chat session
+- `/resume <id>` — Switch to a saved chat session
+- `/rename <id> <title>` — Rename a saved chat session
+- `/model <name>` — Switch Ollama model on the fly
+- `/help` — Show help
+- `/prompt` — Show the system prompt
 
 ---
 

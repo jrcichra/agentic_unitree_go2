@@ -30,6 +30,10 @@ import io
 import shutil
 import subprocess
 import tempfile
+import sqlite3
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
 
 warnings.filterwarnings("ignore")
 os.environ["TERM_IMAGE_LOG_LEVEL"] = "error"
@@ -1472,6 +1476,192 @@ async def run_tool(name: str, args: dict) -> str:
 MAX_HISTORY_TURNS = 20  # keep last N user/assistant pairs to prevent context overflow
 
 
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _default_sessions_db() -> Path:
+    base = os.environ.get("XDG_DATA_HOME")
+    if base:
+        root = Path(base)
+    else:
+        root = Path.home() / ".local" / "share"
+    return root / "agentic-unitree-go2" / "sessions.db"
+
+
+def _message_for_storage(message: dict) -> tuple[str, str, str]:
+    role = str(message.get("role", ""))
+    content = message.get("content", "")
+    if not isinstance(content, str):
+        content = json.dumps(content)
+    metadata = {
+        k: v
+        for k, v in message.items()
+        if k not in {"role", "content", "images"}
+    }
+    if "images" in message:
+        metadata["images_omitted"] = True
+    return role, content, json.dumps(metadata, separators=(",", ":"))
+
+
+def _message_from_storage(row: sqlite3.Row) -> dict:
+    message = {"role": row["role"], "content": row["content"]}
+    try:
+        metadata = json.loads(row["metadata_json"] or "{}")
+    except json.JSONDecodeError:
+        metadata = {}
+    metadata.pop("images_omitted", None)
+    message.update(metadata)
+    return message
+
+
+def _json_for_display(content: str) -> str:
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        return content
+    return json.dumps(parsed, ensure_ascii=False, separators=(",", ": "))
+
+
+class SessionStore:
+    def __init__(self, path: Path):
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(self.path)
+        self.conn.row_factory = sqlite3.Row
+        self._init_schema()
+
+    def _init_schema(self) -> None:
+        self.conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS sessions (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                model TEXT,
+                mode TEXT,
+                robot_ip TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_messages_session_id_id
+                ON messages(session_id, id);
+            CREATE INDEX IF NOT EXISTS idx_sessions_updated_at
+                ON sessions(updated_at);
+            """
+        )
+        self.conn.commit()
+
+    def create_session(
+        self,
+        *,
+        title: str,
+        model: str,
+        mode: str,
+        robot_ip: str | None,
+    ) -> str:
+        session_id = uuid.uuid4().hex[:12]
+        now = _utc_now()
+        self.conn.execute(
+            """
+            INSERT INTO sessions(id, title, created_at, updated_at, model, mode, robot_ip)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (session_id, title, now, now, model, mode, robot_ip),
+        )
+        self.conn.commit()
+        return session_id
+
+    def list_sessions(self, limit: int = 12) -> list[sqlite3.Row]:
+        cur = self.conn.execute(
+            """
+            SELECT s.id, s.title, s.updated_at, s.model, s.mode, COUNT(m.id) AS message_count
+            FROM sessions s
+            LEFT JOIN messages m ON m.session_id = s.id
+            GROUP BY s.id
+            ORDER BY s.updated_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        return list(cur.fetchall())
+
+    def latest_session_id(self) -> str | None:
+        cur = self.conn.execute(
+            """
+            SELECT s.id
+            FROM sessions s
+            WHERE EXISTS (
+                SELECT 1 FROM messages m WHERE m.session_id = s.id
+            )
+            ORDER BY s.updated_at DESC
+            LIMIT 1
+            """
+        )
+        row = cur.fetchone()
+        return row["id"] if row else None
+
+    def get_session(self, session_id: str) -> sqlite3.Row | None:
+        cur = self.conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
+        return cur.fetchone()
+
+    def load_messages(self, session_id: str) -> list[dict]:
+        cur = self.conn.execute(
+            """
+            SELECT role, content, metadata_json
+            FROM messages
+            WHERE session_id = ?
+            ORDER BY id ASC
+            """,
+            (session_id,),
+        )
+        return [_message_from_storage(row) for row in cur.fetchall()]
+
+    def replace_messages(self, session_id: str, messages: list[dict]) -> None:
+        now = _utc_now()
+        with self.conn:
+            self.conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+            for message in messages:
+                if message.get("role") == "system":
+                    continue
+                role, content, metadata = _message_for_storage(message)
+                self.conn.execute(
+                    """
+                    INSERT INTO messages(session_id, role, content, created_at, metadata_json)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (session_id, role, content, now, metadata),
+                )
+            self.conn.execute(
+                "UPDATE sessions SET updated_at = ? WHERE id = ?",
+                (now, session_id),
+            )
+
+    def rename_session(self, session_id: str, title: str) -> bool:
+        cur = self.conn.execute(
+            "UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?",
+            (title, _utc_now(), session_id),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def close(self) -> None:
+        if self.conn is None:
+            return
+        self.conn.close()
+        self.conn = None
+
+
 def _fetch_context_size(model: str, ollama_url: str, timeout: float = 2.0) -> int:
     """Query Ollama for the model's context window size."""
     try:
@@ -1743,7 +1933,7 @@ async def process_turn(
         history.append(
             {
                 "role": "tool",
-                "content": json.dumps(tool_results),
+                "content": json.dumps(tool_results, ensure_ascii=False),
             }
         )
 
@@ -1876,7 +2066,8 @@ Screen {
 }
 
 #input-area {
-    height: 5;
+    height: auto;
+    max-height: 16;
     border-top: solid $accent;
     padding: 0 1;
     layout: vertical;
@@ -1940,6 +2131,18 @@ Screen {
 
 #user-input {
     height: 3;
+}
+
+#command-preview {
+    height: auto;
+    max-height: 12;
+    padding: 0 1;
+    color: $text-muted;
+    display: none;
+}
+
+#command-preview.visible {
+    display: block;
 }
 """
 
@@ -2093,12 +2296,73 @@ KEYBOARD SHORTCUTS
   Ctrl+C         Quit (stops robot first)
 
 BUILT-IN TEXT COMMANDS
-  state          Print robot state
-  clear          Clear conversation
-  model <name>   Switch Ollama model (e.g. model llava)
+  /state          Print robot state
+  /clear          Clear conversation
+  /sessions       List recent saved chat sessions
+  /new            Start a fresh chat session
+  /resume <id>    Switch to a saved chat session
+  /rename <id> <title>
+                  Rename a saved chat session
+  /model <name>   Switch Ollama model (e.g. /model llava)
+  /help           Open this help screen
+  /prompt         Show current system prompt
 """
 
 from textual.screen import ModalScreen
+
+
+SLASH_COMMANDS = [
+    {
+        "name": "/sessions",
+        "usage": "/sessions",
+        "description": "List recent saved chat sessions",
+    },
+    {
+        "name": "/new",
+        "usage": "/new",
+        "description": "Start a fresh chat session",
+    },
+    {
+        "name": "/resume",
+        "usage": "/resume <id>",
+        "description": "Switch to a saved chat session",
+    },
+    {
+        "name": "/rename",
+        "usage": "/rename <id> <title>",
+        "description": "Rename a saved chat session",
+    },
+    {
+        "name": "/model",
+        "usage": "/model <name>",
+        "description": "Switch Ollama model",
+    },
+    {
+        "name": "/state",
+        "usage": "/state",
+        "description": "Print robot state",
+    },
+    {
+        "name": "/clear",
+        "usage": "/clear",
+        "description": "Clear conversation",
+    },
+    {
+        "name": "/help",
+        "usage": "/help",
+        "description": "Open help",
+    },
+    {
+        "name": "/prompt",
+        "usage": "/prompt",
+        "description": "Show current system prompt",
+    },
+    {
+        "name": "/errors",
+        "usage": "/errors",
+        "description": "Toggle error panel",
+    },
+]
 
 
 class HelpScreen(ModalScreen):
@@ -2157,6 +2421,21 @@ class Go2App(App):
         self.ollama_url = _normalize_ollama_url(args.ollama)
         self.use_camera = not args.no_camera
         self.history: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self.session_store = SessionStore(Path(args.sessions_db).expanduser())
+        self.session_id = ""
+        resume_session_id = args.session
+        if not resume_session_id and args.continue_session:
+            resume_session_id = self.session_store.latest_session_id()
+        if resume_session_id and self.session_store.get_session(resume_session_id):
+            self.session_id = resume_session_id
+            self.history.extend(self.session_store.load_messages(self.session_id))
+        else:
+            self.session_id = self.session_store.create_session(
+                title="New session",
+                model=self.model,
+                mode="mock" if args.mock else "robot",
+                robot_ip=args.ip,
+            )
         self._processing = False
         self._camera_task = None
         self._think_timer = None
@@ -2206,9 +2485,10 @@ class Go2App(App):
         # Input area
         with Vertical(id="input-area"):
             yield Label(
-                "Enter: send  │  Ctrl+M: dog mic  │  Ctrl+L: clear  │  Ctrl+E: errors  │  F1: state  │  F2: help  │  F3: prompt  │  Ctrl+C: quit",
+                "Type / for commands  │  Enter sends  │  Ctrl+M records  │  Ctrl+C stops and quits",
                 id="hint-label",
             )
+            yield Static("", id="command-preview")
             yield Input(placeholder="Type a command...", id="user-input")
 
     def on_mount(self) -> None:
@@ -2217,11 +2497,16 @@ class Go2App(App):
             "[bold cyan]Go2 CLI[/bold cyan] ready. "
             f"Model: [yellow]{self.model}[/yellow]  "
             f"Ollama: [dim]{self.ollama_url}[/dim]  "
-            f"Mode: [yellow]{'mock' if self.args.mock else 'robot'}[/yellow]"
+            f"Mode: [yellow]{'mock' if self.args.mock else 'robot'}[/yellow]  "
+            f"Session: [yellow]{self.session_id}[/yellow]"
         )
-        self.log_chat(
-            "[dim]Type commands below. The robot awaits your instructions.[/dim]"
-        )
+        if len(self.history) > 1:
+            self.log_chat("[dim]Resumed saved chat history.[/dim]")
+            self._render_history()
+        else:
+            self.log_chat(
+                "[dim]Type natural language commands, or type / for command shortcuts.[/dim]"
+            )
         self.query_one("#user-input", Input).focus()
         # Start camera update loop
         self.set_interval(1.5 if self.args.mock else 1.0, self._refresh_camera)
@@ -2314,10 +2599,170 @@ class Go2App(App):
         """F3 — show system prompt overlay."""
         self.push_screen(PromptScreen())
 
+    def _persist_session(self) -> None:
+        if self.session_store.conn is None:
+            return
+        self.session_store.replace_messages(self.session_id, self.history)
+
+    def _render_history(self) -> None:
+        for message in self.history:
+            role = message.get("role")
+            content = str(message.get("content", "")).strip()
+            if not content or role == "system":
+                continue
+            if role == "user":
+                display = content.split("\n\n[Robot state:", 1)[0]
+                if display.startswith("[After action"):
+                    continue
+                self.log_chat(f"[bold green]You:[/bold green] {escape(display)}")
+            elif role == "assistant":
+                display = content or "(tool call)"
+                self.log_chat(f"[bold magenta]Go2:[/bold magenta] {escape(display)}")
+            elif role == "tool":
+                self.log_chat(f"[dim]Tools: {escape(_json_for_display(content))}[/dim]")
+
+    def _new_session(self, title: str = "New session") -> None:
+        self._cancel_active_turn()
+        self.session_id = self.session_store.create_session(
+            title=title,
+            model=self.model,
+            mode="mock" if self.args.mock else "robot",
+            robot_ip=self.args.ip,
+        )
+        self.history = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self._queue.clear()
+        log = self.query_one("#chat-log", RichLog)
+        log.clear()
+        self.log_chat(f"[dim]Started session {self.session_id}.[/dim]")
+
+    def _resume_session(self, session_id: str) -> None:
+        if self._processing:
+            self.log_chat("[red]Cannot switch sessions while a turn is running.[/red]")
+            return
+        if not self.session_store.get_session(session_id):
+            self.log_chat(f"[red]No session found for id: {escape(session_id)}[/red]")
+            return
+        self.session_id = session_id
+        self.history = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self.history.extend(self.session_store.load_messages(session_id))
+        log = self.query_one("#chat-log", RichLog)
+        log.clear()
+        self.log_chat(f"[dim]Resumed session {self.session_id}.[/dim]")
+        self._render_history()
+
+    def _list_sessions(self) -> None:
+        rows = self.session_store.list_sessions()
+        if not rows:
+            self.log_chat("[dim]No saved sessions yet.[/dim]")
+            return
+        self.log_chat("[bold]Saved sessions:[/bold]")
+        for row in rows:
+            marker = "*" if row["id"] == self.session_id else " "
+            self.log_chat(
+                "[dim]"
+                f"{marker} {row['id']}  {escape(row['title'])}  "
+                f"{row['message_count']} messages  "
+                f"{row['model'] or '?'}  {row['updated_at']}"
+                "[/dim]"
+            )
+
+    def _update_command_preview(self, value: str) -> None:
+        preview = self.query_one("#command-preview", Static)
+        if not value.startswith("/"):
+            preview.update("")
+            preview.remove_class("visible")
+            return
+
+        token = value.split(None, 1)[0].lower()
+        matches = [
+            command
+            for command in SLASH_COMMANDS
+            if command["name"].startswith(token)
+        ]
+        if not matches:
+            preview.update("[dim]No matching slash commands.[/dim]")
+            preview.add_class("visible")
+            return
+
+        lines = []
+        for command in matches:
+            lines.append(
+                f"[cyan]{command['usage']}[/cyan]  [dim]{command['description']}[/dim]"
+            )
+        preview.update("\n".join(lines))
+        preview.add_class("visible")
+
+    def _hide_command_preview(self) -> None:
+        preview = self.query_one("#command-preview", Static)
+        preview.update("")
+        preview.remove_class("visible")
+
+    def _handle_text_command(self, user_input: str) -> bool:
+        raw = user_input.strip()
+        is_slash = raw.startswith("/")
+        command_text = raw[1:] if is_slash else raw
+        command_text = command_text.strip()
+        lower = command_text.lower()
+
+        if lower == "state":
+            self.action_show_state()
+            return True
+        if lower == "clear":
+            self.action_clear_chat()
+            return True
+        if lower == "sessions":
+            self._list_sessions()
+            return True
+        if lower == "new":
+            self._new_session()
+            return True
+        if lower == "help":
+            self.action_show_help()
+            return True
+        if lower == "prompt":
+            self.action_show_prompt()
+            return True
+        if lower == "errors":
+            self.action_toggle_errors()
+            return True
+        if lower.startswith("resume "):
+            self._resume_session(command_text.split(None, 1)[1].strip())
+            return True
+        if lower == "resume":
+            self.log_chat("[red]Usage: /resume <session-id>[/red]")
+            return True
+        if lower.startswith("rename "):
+            parts = command_text.split(None, 2)
+            if len(parts) < 3:
+                self.log_chat("[red]Usage: /rename <session-id> <title>[/red]")
+                return True
+            if self.session_store.rename_session(parts[1], parts[2].strip()):
+                self.log_chat(f"[dim]Renamed session {escape(parts[1])}.[/dim]")
+            else:
+                self.log_chat(f"[red]No session found for id: {escape(parts[1])}[/red]")
+            return True
+        if lower == "rename":
+            self.log_chat("[red]Usage: /rename <session-id> <title>[/red]")
+            return True
+        if lower.startswith("model "):
+            self.model = command_text.split(None, 1)[1].strip()
+            self.log_chat(f"[dim]Model switched to: {self.model}[/dim]")
+            self._persist_session()
+            return True
+        if lower == "model":
+            self.log_chat("[red]Usage: /model <name>[/red]")
+            return True
+
+        if is_slash:
+            self.log_chat(f"[red]Unknown command: {escape(raw)}[/red]")
+            return True
+        return False
+
     def action_clear_chat(self) -> None:
         self.history = [{"role": "system", "content": SYSTEM_PROMPT}]
         log = self.query_one("#chat-log", RichLog)
         log.clear()
+        self._persist_session()
         self.log_chat("[dim]Conversation cleared.[/dim]")
 
     def action_show_state(self) -> None:
@@ -2325,6 +2770,10 @@ class Go2App(App):
         self.log_chat(
             f"[bold]Robot State:[/bold] {escape(json.dumps(state, indent=2))}"
         )
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "user-input":
+            self._update_command_preview(event.value)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         user_input = event.value.strip()
@@ -2334,22 +2783,14 @@ class Go2App(App):
         inp = self.query_one("#user-input", Input)
         inp.value = ""
         inp.focus()
+        self._hide_command_preview()
 
         if self._processing:
             self._queue.append(user_input)
             self.log_chat(f"[dim]⏳ Queued: {escape(user_input)}[/dim]")
             return
 
-        # Handle built-in commands
-        if user_input.lower() == "state":
-            self.action_show_state()
-            return
-        if user_input.lower() == "clear":
-            self.action_clear_chat()
-            return
-        if user_input.lower().startswith("model "):
-            self.model = user_input.split(None, 1)[1].strip()
-            self.log_chat(f"[dim]Model switched to: {self.model}[/dim]")
+        if self._handle_text_command(user_input):
             return
         self.log_chat(f"[bold green]You:[/bold green] {escape(user_input)}")
         self._run_turn(user_input)
@@ -2424,6 +2865,7 @@ class Go2App(App):
                 self.log_chat, f"[bold red]ERROR:[/bold red] {escape(str(e))}"
             )
         finally:
+            self.call_from_thread(self._persist_session)
             self._turn_future = None
             self.call_from_thread(self._set_processing, False)
 
@@ -2510,10 +2952,13 @@ class Go2App(App):
                 self._think_timer = None
             self.query_one("#status-label", Label).update(self._idle_status())
             self.query_one("#user-input", Input).focus()
-            if self._queue:
+            while self._queue:
                 next_input = self._queue.pop(0)
+                if self._handle_text_command(next_input):
+                    continue
                 self.log_chat(f"[bold green]You:[/bold green] {escape(next_input)}")
                 self._run_turn(next_input)
+                break
 
     def _tick_thinking(self) -> None:
         self._think_idx = (self._think_idx + 1) % len(self._THINK_FRAMES)
@@ -2524,6 +2969,7 @@ class Go2App(App):
 
     async def action_quit(self) -> None:
         self._cancel_active_turn()
+        self._persist_session()
         self.log_chat("[dim]Stopping robot...[/dim]")
         try:
             await _mcf("StopMove")
@@ -2603,6 +3049,7 @@ async def main() -> None:
         epilog="""
 Examples:
   uv run cli.py --mock
+  uv run cli.py --mock -c
   uv run cli.py --ip 10.0.0.200
   uv run cli.py --ip 10.0.0.200 --model llava
   uv run cli.py --ip 10.0.0.200 --no-camera
@@ -2622,6 +3069,19 @@ Examples:
     )
     p.add_argument("--no-camera", action="store_true")
     p.add_argument("--quality", default=75, type=int, help="JPEG quality 1-100")
+    p.add_argument(
+        "-c",
+        "--continue",
+        dest="continue_session",
+        action="store_true",
+        help="Resume the most recently updated chat session",
+    )
+    p.add_argument("--session", default=None, help="Resume a saved chat session id on startup")
+    p.add_argument(
+        "--sessions-db",
+        default=str(_default_sessions_db()),
+        help="SQLite database path for saved chat sessions",
+    )
     p.add_argument("--max-step", default=1.0, type=float, help="Safety governor max move distance per tool call, metres")
     p.add_argument("--max-turn", default=720.0, type=float, help="Safety governor max turn per tool call, degrees")
     p.add_argument("--allow-acrobatics", action="store_true", help="Allow flips, jumps, pounces, and handstands")
@@ -2654,6 +3114,8 @@ Examples:
         await app.run_async()
     finally:
         _cancel_requested.set()
+        app._persist_session()
+        app.session_store.close()
         try:
             await _mcf("StopMove")
             await _mcf("Move", {"x": 0, "y": 0, "z": 0})
