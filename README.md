@@ -97,7 +97,7 @@ uv run cli.py --mock       # offline development
 - **Full-state telemetry**: Position, velocity, battery %, orientation (RPY), gait type, LiDAR obstacle distances
 - **Autonomous tool calling**: move, turn, stance poses, tricks (flips, dances, waves), LED control, speed adjustment
 - **Multi-model support**: Switch between any Ollama model on the fly (`model qwen3.5:35b`)
-- **Voice/audio**: `Ctrl+M` records microphone input, `play_radio` streams audio, `say(text)` speaks via local TTS
+- **Voice/audio**: `Ctrl+M` records from the Go2 microphone, `play_radio` streams audio, `say(text)` speaks via local TTS
 - **Mock mode**: Simulated WebRTC, telemetry, camera frames, motion, volume, audio, and speech without powering on the robot
 - **Conversation history**: Scrollable chat with rich markup highlighting
 - **Error panel**: Toggleable view for debugging connection/command issues
@@ -154,5 +154,5 @@ uv run cli.py --mock       # offline development
 ## Audio Notes
 
 - `play_radio` streams HTTP audio through the robot speaker.
-- `Ctrl+M` in the TUI records microphone input, transcribes it with Whisper, and submits it as a normal command.
+- `Ctrl+M` in the TUI records from the Go2 microphone, transcribes it with Whisper, and submits it as a normal command.
 - `say(text)` uses a local TTS engine (`espeak`, `espeak-ng`, or macOS `say`) when available. In `--mock` mode it reports the spoken text without requiring audio hardware.

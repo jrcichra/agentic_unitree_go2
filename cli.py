@@ -99,14 +99,6 @@ except ImportError:
     np = None
     _CV2 = False
 
-# ── Optional: microphone capture for voice input ─────────────────────────────
-try:
-    import sounddevice as _sd
-    _HAS_SD = True
-except ImportError:
-    _sd = None
-    _HAS_SD = False
-
 # ---------------------------------------------------------------------------
 # TUI imports
 # ---------------------------------------------------------------------------
@@ -165,6 +157,11 @@ _frame_lock = threading.Lock()
 _sport_state: dict = {}
 _low_state: dict = {}
 _main_loop: "asyncio.AbstractEventLoop | None" = None
+_dog_audio_lock = threading.Lock()
+_dog_audio_recording = False
+_dog_audio_chunks: list = []
+_dog_audio_sample_rate = 16000
+_dog_audio_enabled = False
 
 # ── Context tracking ─────────────────────────────────────────────────────────
 _last_prompt_tokens: int = 0
@@ -302,12 +299,24 @@ class _MockVideoChannel:
                 asyncio.ensure_future(cb(_MockVideoTrack()))
 
 
+class _MockAudioChannel:
+    def __init__(self):
+        self._callbacks = []
+
+    def add_track_callback(self, callback):
+        self._callbacks.append(callback)
+
+    def switchAudioChannel(self, enabled):
+        return None
+
+
 class _MockConnection:
     mock = True
 
     def __init__(self):
         self.datachannel = _MockDataChannel()
         self.video = _MockVideoChannel()
+        self.audio = _MockAudioChannel()
         self.pc = None
 
     async def connect(self):
@@ -441,6 +450,87 @@ def _get_frame_b64(quality: int = 75) -> str | None:
         return base64.b64encode(buf.tobytes()).decode("ascii") if ok else None
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Dog microphone
+# ---------------------------------------------------------------------------
+
+
+def _audio_frame_to_float32(frame) -> tuple["np.ndarray | None", int]:
+    if np is None:
+        return None, 16000
+    try:
+        arr = frame.to_ndarray()
+        sample_rate = int(getattr(frame, "sample_rate", 16000) or 16000)
+        arr = np.asarray(arr)
+        if arr.size == 0:
+            return None, sample_rate
+        if np.issubdtype(arr.dtype, np.integer):
+            max_val = max(1, np.iinfo(arr.dtype).max)
+            arr = arr.astype("float32") / max_val
+        else:
+            arr = arr.astype("float32")
+        if arr.ndim == 2:
+            # aiortc/av usually returns planar audio as channels x samples.
+            arr = arr.mean(axis=0 if arr.shape[0] <= 8 else 1)
+        else:
+            arr = arr.reshape(-1)
+        return np.clip(arr, -1.0, 1.0).astype("float32"), sample_rate
+    except Exception:
+        return None, 16000
+
+
+def _resample_audio(audio, source_rate: int, target_rate: int = 16000):
+    if np is None or source_rate == target_rate or audio.size == 0:
+        return audio
+    duration = audio.size / float(source_rate)
+    target_size = max(1, int(duration * target_rate))
+    src_x = np.linspace(0.0, duration, num=audio.size, endpoint=False)
+    dst_x = np.linspace(0.0, duration, num=target_size, endpoint=False)
+    return np.interp(dst_x, src_x, audio).astype("float32")
+
+
+async def _setup_dog_audio_input() -> None:
+    global _dog_audio_enabled
+    ch = getattr(_conn, "audio", None)
+    if ch is None:
+        _dog_audio_enabled = False
+        return
+
+    async def on_audio_frame(frame):
+        global _dog_audio_sample_rate
+        if not _dog_audio_recording:
+            return
+        samples, sample_rate = _audio_frame_to_float32(frame)
+        if samples is None:
+            return
+        with _dog_audio_lock:
+            _dog_audio_sample_rate = sample_rate
+            _dog_audio_chunks.append(samples)
+
+    ch.add_track_callback(on_audio_frame)
+    ch.switchAudioChannel(True)
+    _dog_audio_enabled = True
+
+
+def _start_dog_audio_recording() -> None:
+    global _dog_audio_recording, _dog_audio_chunks
+    with _dog_audio_lock:
+        _dog_audio_chunks = []
+    _dog_audio_recording = True
+
+
+def _stop_dog_audio_recording():
+    global _dog_audio_recording
+    _dog_audio_recording = False
+    with _dog_audio_lock:
+        chunks = list(_dog_audio_chunks)
+        sample_rate = _dog_audio_sample_rate
+    if not chunks or np is None:
+        return None
+    audio = np.concatenate(chunks).astype("float32")
+    return _resample_audio(audio, sample_rate, 16000)
 
 
 # ---------------------------------------------------------------------------
@@ -1854,12 +1944,12 @@ RADIO / AUDIO  (just tell the model naturally)
   "say hello"                     speaks through the robot speaker if TTS is installed
 
 VOICE INPUT
-  Ctrl+M                          toggle mic recording on/off
+  Ctrl+M                          toggle Go2 microphone recording on/off
                                   (transcribed with Whisper, submitted as command)
 
 KEYBOARD SHORTCUTS
   Enter          Send command
-  Ctrl+M         Toggle microphone recording
+  Ctrl+M         Toggle Go2 microphone recording
   Ctrl+L         Clear conversation history
   Ctrl+E         Toggle error panel
   F1             Show robot state in chat
@@ -1938,8 +2028,6 @@ class Go2App(App):
         self._think_idx = 0
         self._queue: list[str] = []
         self._recording = False
-        self._recording_chunks: list = []
-        self._recording_stream = None
         self._context_fetching = False
         self._last_context_fetch_ts = 0.0
 
@@ -1982,7 +2070,7 @@ class Go2App(App):
         # Input area
         with Vertical(id="input-area"):
             yield Label(
-                "Enter: send  │  Ctrl+M: mic  │  Ctrl+L: clear  │  Ctrl+E: errors  │  F1: state  │  F2: help  │  F3: prompt  │  Ctrl+C: quit",
+                "Enter: send  │  Ctrl+M: dog mic  │  Ctrl+L: clear  │  Ctrl+E: errors  │  F1: state  │  F2: help  │  F3: prompt  │  Ctrl+C: quit",
                 id="hint-label",
             )
             yield Input(placeholder="Type a command...", id="user-input")
@@ -2201,11 +2289,11 @@ class Go2App(App):
     # ── Mic / voice input ────────────────────────────────────────────────────
 
     def action_toggle_mic(self) -> None:
-        if not _HAS_SD:
-            self.log_chat("[red]Voice input requires sounddevice: uv add sounddevice[/red]")
-            return
         if np is None:
             self.log_chat("[red]Voice input requires numpy.[/red]")
+            return
+        if not _dog_audio_enabled:
+            self.log_chat("[red]Dog microphone audio is not available on this connection.[/red]")
             return
         if self._recording:
             self._stop_and_transcribe()
@@ -2213,30 +2301,17 @@ class Go2App(App):
             self._start_recording()
 
     def _start_recording(self) -> None:
-        try:
-            self._recording_chunks = []
-            self._recording_stream = _sd.InputStream(
-                samplerate=16000, channels=1, dtype="float32",
-                callback=lambda indata, frames, time, status: self._recording_chunks.append(indata.copy()),
-            )
-            self._recording_stream.start()
-            self._recording = True
-            self.query_one("#status-label", Label).update("🎤 Recording... (Ctrl+M to stop)")
-        except Exception as e:
-            self._recording = False
-            self._recording_stream = None
-            self.log_chat(f"[red]Could not start microphone: {escape(str(e))}[/red]")
+        _start_dog_audio_recording()
+        self._recording = True
+        self.query_one("#status-label", Label).update("🎤 Dog mic recording... (Ctrl+M to stop)")
 
     @work(exclusive=False, thread=True)
     def _stop_and_transcribe(self) -> None:
         self._recording = False
-        if self._recording_stream:
-            self._recording_stream.stop()
-            self._recording_stream.close()
-            self._recording_stream = None
+        audio = _stop_dog_audio_recording()
 
-        if not self._recording_chunks:
-            self.call_from_thread(self.log_chat, "[dim]No audio captured.[/dim]")
+        if audio is None or getattr(audio, "size", 0) == 0:
+            self.call_from_thread(self.log_chat, "[dim]No dog microphone audio captured.[/dim]")
             self.call_from_thread(
                 self.query_one("#status-label", Label).update, self._idle_status()
             )
@@ -2246,7 +2321,6 @@ class Go2App(App):
             self.query_one("#status-label", Label).update, "⏳ Transcribing..."
         )
         try:
-            audio = np.concatenate(self._recording_chunks).flatten()
             try:
                 text = _transcribe_audio(audio)
             except ImportError:
@@ -2323,6 +2397,7 @@ async def connect(args: argparse.Namespace) -> None:
         await _conn.connect()
         print("ready!")
         _setup_state()
+        await _setup_dog_audio_input()
         if not args.no_camera:
             await _start_camera()
         return
@@ -2348,6 +2423,7 @@ async def connect(args: argparse.Namespace) -> None:
     await _conn.connect()
     print("connected!")
     _setup_state()
+    await _setup_dog_audio_input()
 
     if not args.no_camera:
         await _start_camera()
