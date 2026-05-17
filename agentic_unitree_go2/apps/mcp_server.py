@@ -23,6 +23,7 @@ import asyncio
 import argparse
 import json
 import logging
+import math
 import sys
 import os
 import shutil
@@ -129,6 +130,10 @@ _safety_governor = McpSafetyGovernor(
     sport_state=lambda: _latest_sport_state,
 )
 
+# Position tracking — origin set on first sport state update
+_position_origin: list[float] = [0.0, 0.0, 0.0]
+_position_origin_set: bool = False
+
 
 def _robot_is_fallen() -> bool:
     return _safety_governor.robot_is_fallen()
@@ -144,6 +149,97 @@ def _motion_blocked_by_state(name: str) -> str | None:
 
 def _govern_tool(name: str, args: dict) -> tuple[bool, dict, str | None]:
     return _safety_governor.govern(name, args)
+
+
+def _capture_frame_b64(quality: int = 60) -> str | None:
+    """Return the latest camera frame as a base64 JPEG string, or None if unavailable."""
+    if not _CV2_AVAILABLE or _latest_frame_jpg is None:
+        return None
+    if time.time() - _latest_frame_ts > 5.0:
+        return None
+    img = cv2.imdecode(np.frombuffer(_latest_frame_jpg, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        return None
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    if not ok:
+        return None
+    return base64.b64encode(buf.tobytes()).decode("ascii")
+
+
+def _build_state_summary() -> dict:
+    """Build a pre-interpreted state dict from cached sport/low/multi state."""
+    sport = _latest_sport_state
+    low = _latest_low_state
+    multi = _latest_multi_state
+
+    rpy = sport.get("imu_state", {}).get("rpy", [0.0, 0.0, 0.0])
+    pos = sport.get("position", [0.0, 0.0, 0.0])
+    vel = sport.get("velocity", [0.0, 0.0, 0.0])
+    ranges = sport.get("range_obstacle", [])
+    bms = low.get("bms_state", {})
+    gait_map = {0: "idle", 1: "trot", 2: "trot_run", 3: "climb_stair", 4: "free_walk"}
+
+    traveled = [
+        round(float(pos[i]) - _position_origin[i], 3) if _position_origin_set and i < len(pos) else 0.0
+        for i in range(3)
+    ]
+    forward_obs_raw = float(ranges[0]) if isinstance(ranges, list) and ranges else 0.0
+
+    summary: dict = {
+        "battery_pct": bms.get("soc"),
+        "voltage_v": bms.get("voltage"),
+        "fallen": _safety_governor.robot_is_fallen(),
+        "gait": gait_map.get(sport.get("gait_type", 0), f"gait_{sport.get('gait_type', 0)}"),
+        "body_height_m": round(float(sport.get("body_height", 0.31)), 3),
+        "position_m": {"x": round(float(pos[0]), 3), "y": round(float(pos[1]), 3)} if pos else None,
+        "traveled_m": {"x": traveled[0], "y": traveled[1]},
+        "heading_deg": round(math.degrees(float(rpy[2])), 1) if len(rpy) > 2 else None,
+        "rpy_deg": {
+            "roll": round(math.degrees(float(rpy[0])), 1),
+            "pitch": round(math.degrees(float(rpy[1])), 1),
+            "yaw": round(math.degrees(float(rpy[2])), 1),
+        } if len(rpy) >= 3 else None,
+        "velocity_ms": {"x": round(float(vel[0]), 3), "y": round(float(vel[1]), 3)} if vel else None,
+        "forward_obstacle_m": round(forward_obs_raw, 3) if forward_obs_raw > 0 else None,
+    }
+    if multi:
+        summary["volume"] = multi.get("volume")
+        summary["speed_level"] = multi.get("speed_level")
+    return summary
+
+
+def _lidar_sectors(positions_flat: list) -> dict:
+    """Compute minimum clearance (metres) per 45° angular sector from flat [x,y,z,...] point list."""
+    sectors = ["forward", "forward_left", "left", "back_left", "back", "back_right", "right", "forward_right"]
+    mins: dict[str, float] = {s: float("inf") for s in sectors}
+
+    for i in range(0, len(positions_flat) - 2, 3):
+        x, y, z = float(positions_flat[i]), float(positions_flat[i + 1]), float(positions_flat[i + 2])
+        if z < -0.1 or z > 1.5:
+            continue
+        dist = math.sqrt(x * x + y * y)
+        if dist < 0.1:
+            continue
+        angle = math.degrees(math.atan2(y, x))  # 0°=forward, 90°=left
+        if -22.5 <= angle < 22.5:
+            s = "forward"
+        elif 22.5 <= angle < 67.5:
+            s = "forward_left"
+        elif 67.5 <= angle < 112.5:
+            s = "left"
+        elif 112.5 <= angle < 157.5:
+            s = "back_left"
+        elif angle >= 157.5 or angle < -157.5:
+            s = "back"
+        elif -157.5 <= angle < -112.5:
+            s = "back_right"
+        elif -112.5 <= angle < -67.5:
+            s = "right"
+        else:
+            s = "forward_right"
+        mins[s] = min(mins[s], dist)
+
+    return {s: round(v, 3) if v != float("inf") else None for s, v in mins.items()}
 
 
 def _mock_status(code: int = 0, data=None) -> dict:
@@ -689,7 +785,12 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="get_robot_state",
-            description="Query the robot's full internal state snapshot via MCF GetState.",
+            description=(
+                "Get a pre-interpreted summary of the robot's current state: battery, fallen status, "
+                "gait, body height, position, distance traveled since startup, heading, velocity, "
+                "forward obstacle distance, volume, and speed level. "
+                "Use this as your first call to understand where the robot is and what it can do."
+            ),
             inputSchema={"type": "object", "properties": {}},
         ),
         # ── VUI — lights & sound ──────────────────────────────────────────────
@@ -784,10 +885,52 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="lidar_snapshot",
             description=(
-                "One-shot LiDAR scan. Returns point count and 3-D bounding box in metres. "
-                "Turns LiDAR on, grabs one frame, turns it off."
+                "One-shot LiDAR scan. Returns clearance distances in 8 angular sectors "
+                "(forward, forward_left, left, back_left, back, back_right, right, forward_right) "
+                "plus total point count. null means no points detected in that sector. "
+                "Use this before moving to understand which directions are clear."
             ),
             inputSchema={"type": "object", "properties": {}},
+        ),
+        # ── Navigation ────────────────────────────────────────────────────────
+        types.Tool(
+            name="navigate",
+            description=(
+                "Move the robot in a cardinal direction for a given distance, executing as multiple "
+                "small steps server-side with automatic obstacle checking between each step. "
+                "Returns steps completed, stop reason (reached/obstacle/fallen/error), distance traveled, "
+                "and a camera view at completion. "
+                "direction: forward, backward, left, right. "
+                "distance_m: total distance in metres (max 10). "
+                "step_m: size of each step (default 0.3, capped by safety max-step). "
+                "stop_on_obstacle: halt before a forward obstacle (default true)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "direction": {
+                        "type": "string",
+                        "enum": ["forward", "backward", "left", "right"],
+                    },
+                    "distance_m": {
+                        "type": "number",
+                        "description": "Total distance to travel in metres",
+                        "minimum": 0.05,
+                        "maximum": 10.0,
+                    },
+                    "step_m": {
+                        "type": "number",
+                        "description": "Step size per iteration in metres (default 0.3)",
+                        "minimum": 0.05,
+                        "maximum": 1.0,
+                    },
+                    "stop_on_obstacle": {
+                        "type": "boolean",
+                        "description": "Stop if forward obstacle detected within safety threshold (default true)",
+                    },
+                },
+                "required": ["direction", "distance_m"],
+            },
         ),
         # ── Camera ────────────────────────────────────────────────────────────
         types.Tool(
@@ -989,7 +1132,11 @@ async def _dispatch(conn: UnitreeWebRTCConnection, name: str, args: dict) -> dic
         x = float(args.get("x", 0))
         y = float(args.get("y", 0))
         z = float(args.get("z", 0))
-        return await _mcf(conn, "Move", {"x": x, "y": y, "z": z})
+        result = await _mcf(conn, "Move", {"x": x, "y": y, "z": z})
+        frame = _capture_frame_b64(quality=60)
+        if frame:
+            result["image_base64"] = frame
+        return result
 
     elif name == "stop":
         return await _mcf(conn, "StopMove")
@@ -1239,13 +1386,9 @@ async def _dispatch(conn: UnitreeWebRTCConnection, name: str, args: dict) -> dic
         return {"status": "ok", "state": _latest_multi_state}
 
     elif name == "get_robot_state":
-        resp = await conn.datachannel.pub_sub.publish_request_new(
-            MCF_TOPIC, {"api_id": MCF_CMD["GetState"]}
-        )
-        code = _code(resp)
-        if code == 0:
-            return {"status": "ok", "state": resp.get("data", {}).get("data")}
-        return {"status": "error", "response_code": code}
+        if not _latest_sport_state and not _latest_low_state:
+            return {"status": "no_data", "message": "No state received yet — try again in a moment."}
+        return {"status": "ok", **_build_state_summary()}
 
     # ── VUI ───────────────────────────────────────────────────────────────────
     elif name == "set_led_color":
@@ -1314,8 +1457,12 @@ async def _dispatch(conn: UnitreeWebRTCConnection, name: str, args: dict) -> dic
             return {
                 "status": "ok",
                 "mode": "mock",
-                "point_count": 4,
-                "bounding_box": {"x_m": [0.8, 2.4], "y_m": [-0.7, 0.9], "z_m": [0.0, 1.1]},
+                "point_count": 24,
+                "free_space_m": {
+                    "forward": 0.8, "forward_left": 1.5, "left": 0.7,
+                    "back_left": None, "back": None, "back_right": None,
+                    "right": 2.1, "forward_right": 1.2,
+                },
                 "origin": "mock",
                 "resolution": 0.05,
             }
@@ -1342,20 +1489,9 @@ async def _dispatch(conn: UnitreeWebRTCConnection, name: str, args: dict) -> dic
                         positions = list(positions)
 
                     if len(positions) >= 3:
-                        pts = [
-                            [positions[i], positions[i + 1], positions[i + 2]]
-                            for i in range(0, len(positions) - 2, 3)
-                        ]
-                        if pts:
-                            xs = [p[0] for p in pts]
-                            ys = [p[1] for p in pts]
-                            zs = [p[2] for p in pts]
-                            snap["point_count"] = len(pts)
-                            snap["bounding_box"] = {
-                                "x_m": [round(min(xs), 3), round(max(xs), 3)],
-                                "y_m": [round(min(ys), 3), round(max(ys), 3)],
-                                "z_m": [round(min(zs), 3), round(max(zs), 3)],
-                            }
+                        n_pts = len(positions) // 3
+                        snap["point_count"] = n_pts
+                        snap["free_space_m"] = _lidar_sectors(positions)
 
                 snap["origin"] = message.get("data", {}).get("origin")
                 snap["resolution"] = message.get("data", {}).get("resolution")
@@ -1381,6 +1517,50 @@ async def _dispatch(conn: UnitreeWebRTCConnection, name: str, args: dict) -> dic
         conn.datachannel.pub_sub.publish_without_callback("rt/utlidar/switch", "off")
         snap["status"] = "ok"
         return snap
+
+    elif name == "navigate":
+        direction = str(args.get("direction", "forward"))
+        distance_m = max(0.05, min(10.0, float(args.get("distance_m", 1.0))))
+        step_m = max(0.05, min(float(_safety_config.max_step_m), float(args.get("step_m", 0.3))))
+        stop_on_obstacle = bool(args.get("stop_on_obstacle", True))
+
+        if direction not in ("forward", "backward", "left", "right"):
+            return {"status": "error", "message": f"Unknown direction '{direction}'. Use: forward, backward, left, right"}
+
+        dx = step_m if direction == "forward" else (-step_m if direction == "backward" else 0.0)
+        dy = step_m if direction == "left" else (-step_m if direction == "right" else 0.0)
+
+        steps_total = max(1, round(distance_m / step_m))
+        steps_done = 0
+        stop_reason = "reached"
+
+        for _ in range(steps_total):
+            if stop_on_obstacle and direction == "forward":
+                obs = _safety_governor.forward_obstacle_m()
+                if 0 < obs < float(_safety_config.obstacle_stop_m):
+                    stop_reason = "obstacle"
+                    break
+            if _safety_governor.robot_is_fallen():
+                stop_reason = "fallen"
+                break
+            r = await _mcf(conn, "Move", {"x": dx, "y": dy, "z": 0.0})
+            if r.get("response_code", -1) != 0:
+                stop_reason = "error"
+                break
+            steps_done += 1
+
+        result: dict = {
+            "status": "ok",
+            "direction": direction,
+            "distance_requested_m": round(distance_m, 3),
+            "distance_traveled_m": round(steps_done * step_m, 3),
+            "steps_completed": steps_done,
+            "stop_reason": stop_reason,
+        }
+        frame = _capture_frame_b64(quality=60)
+        if frame:
+            result["image_base64"] = frame
+        return result
 
     elif name == "capture_image":
         if not _CV2_AVAILABLE:
@@ -1431,8 +1611,13 @@ async def _dispatch(conn: UnitreeWebRTCConnection, name: str, args: dict) -> dic
 
 def _setup_state_subscriptions(conn: UnitreeWebRTCConnection) -> None:
     def on_sport(msg):
-        global _latest_sport_state
+        global _latest_sport_state, _position_origin, _position_origin_set
         _latest_sport_state = msg.get("data", {})
+        if not _position_origin_set:
+            pos = _latest_sport_state.get("position")
+            if pos and len(pos) >= 2:
+                _position_origin = [float(v) for v in pos]
+                _position_origin_set = True
 
     def on_low(msg):
         global _latest_low_state

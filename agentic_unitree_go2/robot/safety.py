@@ -69,6 +69,7 @@ MCP_HIGH_RISK_TOOLS = {
 }
 
 MCP_MOTION_TOOLS = {
+    "navigate",
     "move",
     "set_gait",
     "lead_follow",
